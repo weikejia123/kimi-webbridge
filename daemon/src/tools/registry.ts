@@ -1,0 +1,133 @@
+/**
+ * Kimi WebBridge v2.0 — Tool Registry
+ *
+ * Worker-1C owns this file. Phase 1 handlers registered.
+ * Worker-2B added Phase 2 evaluate handlers.
+ * Worker-3B added Phase 3 observation handlers.
+ */
+
+import type { BridgeCommand, BridgeResponse } from "../shared/protocol.js";
+
+export interface ToolContext {
+  tabId: number;
+  frameId?: number;
+  timeoutMs?: number;
+  command: BridgeCommand;
+  authenticated?: boolean;
+  abortSignal?: AbortSignal;
+}
+
+export type ToolHandler = (
+  args: unknown,
+  context: ToolContext,
+) => Promise<BridgeResponse>;
+
+/** Global tool registry mapping tool names to their handlers. */
+export const registry = new Map<string, ToolHandler>();
+
+/** Resolve a handler for the given command. */
+export function resolveTool(cmd: BridgeCommand): ToolHandler | undefined {
+  return registry.get(cmd.tool);
+}
+
+// ---------------------------------------------------------------------------
+// Phase 1 tool handlers
+// ---------------------------------------------------------------------------
+
+import { handlePressKey } from "./pressKey.js";
+import { handleKeyCombo } from "./keyCombo.js";
+import { handleFocus } from "./focus.js";
+import { handleSubmitForm } from "./submitForm.js";
+import { handleWaitFor } from "./waitFor.js";
+
+async function handlePing(_args: unknown, ctx: ToolContext): Promise<BridgeResponse> {
+  return {
+    v: "2.0",
+    id: ctx.command.id,
+    ok: true,
+    tool: ctx.command.tool,
+    result: { pong: true },
+    error: null,
+    warnings: [],
+    telemetry: { durationMs: 0 },
+  };
+}
+
+registry.set("press_key", handlePressKey);
+registry.set("key_combo", handleKeyCombo);
+registry.set("focus", handleFocus);
+registry.set("submit_form", handleSubmitForm);
+registry.set("wait_for", handleWaitFor);
+registry.set("ping", handlePing);
+
+// ---------------------------------------------------------------------------
+// Phase 2 tool handlers
+// ---------------------------------------------------------------------------
+
+import { handleEvaluateV2 } from "./evaluateV2.js";
+import { handleEvaluate } from "./evaluate.js";
+
+registry.set("evaluate_v2", handleEvaluateV2);
+registry.set("evaluate", handleEvaluate);
+
+// ---------------------------------------------------------------------------
+// Phase 3 tool handlers — Unified Observation + Chunked Extraction
+// ---------------------------------------------------------------------------
+
+import { handleGetPageState } from "./getPageState.js";
+import { handleExtractText } from "./extractText.js";
+import { handleGetFullText } from "./getFullText.js";
+import { handleQueryElements } from "./queryElements.js";
+import { handleSnapshot } from "./snapshot.js";
+
+registry.set("get_page_state", handleGetPageState);
+registry.set("extract_text", handleExtractText);
+registry.set("get_full_text", handleGetFullText);
+registry.set("query_elements", handleQueryElements);
+registry.set("snapshot", handleSnapshot);
+
+// ---------------------------------------------------------------------------
+// Phase 4 tool handlers — Element Registry + Reliable Targeting
+// ---------------------------------------------------------------------------
+
+import { handleFindElement } from "./findElement.js";
+import { handleListActions } from "./listActions.js";
+import { handleDescribeElement } from "./describeElement.js";
+import { handleHighlight } from "./highlight.js";
+import { handleClickRef } from "./clickRef.js";
+import { handleClick } from "./click.js";
+import { handleFill } from "./fill.js";
+
+registry.set("find_element", handleFindElement);
+registry.set("list_actions", handleListActions);
+registry.set("describe_element", handleDescribeElement);
+registry.set("highlight", handleHighlight);
+registry.set("click_ref", handleClickRef);
+registry.set("click", handleClick);
+registry.set("fill", handleFill);
+
+// ---------------------------------------------------------------------------
+// Phase 5 tool handlers — Reliability Layer
+// ---------------------------------------------------------------------------
+
+import { handleRecover } from "./recover.js";
+
+registry.set("recover", handleRecover);
+
+// ---------------------------------------------------------------------------
+// Phase 6 tool handlers — Daemon Hardening, Status, UX Polish
+// ---------------------------------------------------------------------------
+
+import { handleGetBridgeStatus } from "./getBridgeStatus.js";
+import { handleSetPolicy } from "./setPolicy.js";
+import { handleStartTrace } from "./startTrace.js";
+import { handleStopTrace } from "./stopTrace.js";
+import { handleGetLastTrace } from "./getLastTrace.js";
+import { handleCaptureScreenshot } from "./captureScreenshot.js";
+
+registry.set("get_bridge_status", handleGetBridgeStatus);
+registry.set("set_policy", handleSetPolicy);
+registry.set("start_trace", handleStartTrace);
+registry.set("stop_trace", handleStopTrace);
+registry.set("get_last_trace", handleGetLastTrace);
+registry.set("capture_screenshot", handleCaptureScreenshot);

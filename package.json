@@ -1,0 +1,16 @@
+{
+  "name": "kimi-webbridge",
+  "version": "2.0.0",
+  "private": true,
+  "workspaces": [
+    "extension",
+    "daemon"
+  ],
+  "scripts": {
+    "build": "npm run build --workspaces",
+    "typecheck": "npm run typecheck --workspaces"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.0"
+  }
+}
