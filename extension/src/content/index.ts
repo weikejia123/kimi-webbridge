@@ -369,7 +369,7 @@ async function handleGetFullText(cmd: BridgeCommand): Promise<BridgeResponse> {
   do {
     iterations++;
     if (iterations > maxIterations) {
-      console.warn("[Kimi WebBridge] get_full_text exceeded max iterations");
+      console.warn("[Fahd's WebBridge] get_full_text exceeded max iterations");
       truncated = true;
       break;
     }
@@ -929,4 +929,4 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   return true; // async response
 });
 
-console.info("[Kimi WebBridge] Content script loaded.");
+console.info("[Fahd's WebBridge] Content script loaded.");

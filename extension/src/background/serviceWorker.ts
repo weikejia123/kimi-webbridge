@@ -65,7 +65,7 @@ function connect(): void {
     return;
   }
   if (activeTabId === null) {
-    console.info("[Kimi WebBridge] No active tab; deferring daemon connection");
+    console.info("[Fahd's WebBridge] No active tab; deferring daemon connection");
     return;
   }
 
@@ -80,18 +80,18 @@ function connect(): void {
   }
 
   const url = getWebSocketUrl();
-  console.info("[Kimi WebBridge] Connecting to daemon:", url);
+  console.info("[Fahd's WebBridge] Connecting to daemon:", url);
 
   try {
     ws = new WebSocket(url);
   } catch (err) {
-    console.error("[Kimi WebBridge] Failed to create WebSocket:", err);
+    console.error("[Fahd's WebBridge] Failed to create WebSocket:", err);
     scheduleReconnect();
     return;
   }
 
   ws.onopen = (): void => {
-    console.info("[Kimi WebBridge] Connected to daemon");
+    console.info("[Fahd's WebBridge] Connected to daemon");
     reconnectAttempts = 0;
     setConnectionState(true, activeTabId);
     sendRegistration();
@@ -100,17 +100,17 @@ function connect(): void {
   ws.onmessage = (event: MessageEvent): void => {
     handleDaemonMessage(event.data).catch((err: unknown) => {
       const msg = err instanceof Error ? err.message : String(err);
-      console.error("[Kimi WebBridge] Error handling daemon message:", msg);
+      console.error("[Fahd's WebBridge] Error handling daemon message:", msg);
     });
   };
 
   ws.onerror = (event: Event): void => {
-    console.error("[Kimi WebBridge] WebSocket error:", event);
+    console.error("[Fahd's WebBridge] WebSocket error:", event);
   };
 
   ws.onclose = (event: CloseEvent): void => {
     console.info(
-      "[Kimi WebBridge] WebSocket closed:",
+      "[Fahd's WebBridge] WebSocket closed:",
       event.code,
       event.reason,
     );
@@ -130,7 +130,7 @@ async function sendRegistration(): Promise<void> {
   try {
     ws.send(JSON.stringify({ type: "auth", token }));
   } catch (err) {
-    console.error("[Kimi WebBridge] Failed to send auth:", err);
+    console.error("[Fahd's WebBridge] Failed to send auth:", err);
   }
 
   const registration = {
@@ -143,7 +143,7 @@ async function sendRegistration(): Promise<void> {
   try {
     ws.send(JSON.stringify(registration));
   } catch (err) {
-    console.error("[Kimi WebBridge] Failed to send registration:", err);
+    console.error("[Fahd's WebBridge] Failed to send registration:", err);
   }
 }
 
@@ -155,14 +155,14 @@ function scheduleReconnect(): void {
   }
 
   if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
-    console.error("[Kimi WebBridge] Max reconnect attempts reached");
+    console.error("[Fahd's WebBridge] Max reconnect attempts reached");
     return;
   }
 
   reconnectAttempts++;
   const delay = RECONNECT_BASE_DELAY_MS * Math.pow(2, reconnectAttempts - 1);
   console.info(
-    `[Kimi WebBridge] Reconnecting in ${delay}ms (attempt ${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})`,
+    `[Fahd's WebBridge] Reconnecting in ${delay}ms (attempt ${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})`,
   );
 
   reconnectTimer = self.setTimeout(() => {
@@ -174,14 +174,14 @@ function scheduleReconnect(): void {
 function sendToDaemon(response: BridgeResponse): void {
   if (ws === null || ws.readyState !== WebSocket.OPEN) {
     console.warn(
-      "[Kimi WebBridge] Cannot send response; WebSocket not open",
+      "[Fahd's WebBridge] Cannot send response; WebSocket not open",
     );
     return;
   }
   try {
     ws.send(JSON.stringify(response));
   } catch (err) {
-    console.error("[Kimi WebBridge] Failed to send response:", err);
+    console.error("[Fahd's WebBridge] Failed to send response:", err);
   }
 }
 
@@ -215,7 +215,7 @@ async function handleDaemonMessage(data: unknown): Promise<void> {
   try {
     parsed = typeof data === "string" ? JSON.parse(data) : data;
   } catch (err) {
-    console.error("[Kimi WebBridge] Invalid JSON from daemon:", err);
+    console.error("[Fahd's WebBridge] Invalid JSON from daemon:", err);
     return;
   }
 
@@ -223,7 +223,7 @@ async function handleDaemonMessage(data: unknown): Promise<void> {
 
   // Ignore non-command frames (e.g. registration acks).
   if (typeof msg.id !== "string" || typeof msg.tool !== "string") {
-    console.warn("[Kimi WebBridge] Malformed message from daemon:", parsed);
+    console.warn("[Fahd's WebBridge] Malformed message from daemon:", parsed);
     return;
   }
 
@@ -458,16 +458,16 @@ chrome.alarms.onAlarm.addListener((alarm): void => {
 
 // Keep the service worker alive while internal or external ports are active.
 chrome.runtime.onConnect.addListener((port): void => {
-  console.info("[Kimi WebBridge] Internal port connected:", port.name);
+  console.info("[Fahd's WebBridge] Internal port connected:", port.name);
   port.onDisconnect.addListener((): void => {
-    console.info("[Kimi WebBridge] Internal port disconnected:", port.name);
+    console.info("[Fahd's WebBridge] Internal port disconnected:", port.name);
   });
 });
 
 chrome.runtime.onConnectExternal.addListener((port): void => {
-  console.info("[Kimi WebBridge] External port connected:", port.name);
+  console.info("[Fahd's WebBridge] External port connected:", port.name);
   port.onDisconnect.addListener((): void => {
-    console.info("[Kimi WebBridge] External port disconnected");
+    console.info("[Fahd's WebBridge] External port disconnected");
   });
 });
 
@@ -597,7 +597,7 @@ function updateActiveTab(tabId: number): void {
   if (activeTabId === tabId) return;
   activeTabId = tabId;
   setConnectionState(ws !== null && ws.readyState === WebSocket.OPEN, activeTabId);
-  console.info("[Kimi WebBridge] Active tab updated:", tabId);
+  console.info("[Fahd's WebBridge] Active tab updated:", tabId);
 
   // Reconnect so the daemon sees the new tabId in the query string.
   if (ws !== null && ws.readyState === WebSocket.OPEN) {
@@ -726,7 +726,7 @@ chrome.runtime.onMessageExternal.addListener(
 // ---------------------------------------------------------------------------
 
 chrome.runtime.onStartup.addListener((): void => {
-  console.info("[Kimi WebBridge] Service worker startup");
+  console.info("[Fahd's WebBridge] Service worker startup");
   connect();
 });
 
@@ -751,12 +751,12 @@ async function ensurePersistentToken(): Promise<string> {
   }
   const token = generateHexToken(32);
   await chrome.storage.local.set({ daemonToken: token });
-  console.info("[Kimi WebBridge] Generated persistent daemon token");
+  console.info("[Fahd's WebBridge] Generated persistent daemon token");
   return token;
 }
 
 chrome.runtime.onInstalled.addListener((): void => {
-  console.info("[Kimi WebBridge] Service worker installed");
+  console.info("[Fahd's WebBridge] Service worker installed");
   void ensurePersistentToken();
   connect();
 });
@@ -773,4 +773,4 @@ void (async (): Promise<void> => {
   connect();
 })();
 
-console.info("[Kimi WebBridge] Service worker loaded.");
+console.info("[Fahd's WebBridge] Service worker loaded.");
