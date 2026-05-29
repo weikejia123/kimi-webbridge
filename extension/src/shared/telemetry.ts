@@ -49,6 +49,8 @@ export type ActionResult = {
   post?: MiniPageState;
   diff?: PageStateDiff;
   error?: string;
+  matched?: number;
+  preScreenshot?: string | undefined;
 };
 
 export type ActionResultWithOptionalState = ActionResult & {

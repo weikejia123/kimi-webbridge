@@ -9,17 +9,31 @@ import type {
   BridgeCommand,
   BridgeResponse,
   BridgeStatus,
+  BridgeErrorCode,
   FullTextResult,
   TargetRef,
   ElementDescription,
   ActionListResult,
   WaitAfterPolicy,
+  ElementInfo,
 } from "../shared/protocol.js";
 import type { ActionResult, ActionResultWithOptionalState } from "../shared/telemetry.js";
 import { createBridgeError } from "../shared/errors.js";
 import { buildTelemetry, resolveTarget, scrollIntoView, elementToLite, performAction } from "./actionRuntime.js";
-import { captureMiniPageState, computePageDiff } from "./pageDiff.js";
+import {
+  captureMiniPageState,
+  computePageDiff,
+  captureSemanticSnapshot,
+  computeSemanticChanges,
+  setLastSemanticSnapshot,
+  getLastSemanticSnapshot,
+  type SemanticChange,
+} from "./pageDiff.js";
 import { fillElement } from "./fillNative.js";
+import { selectOption, type SelectOptionArgs } from "./selectOption.js";
+import { scrollToElement, scrollByOffset, type ScrollToArgs } from "./scrollTo.js";
+import { hoverElement } from "./hover.js";
+import { clickAt } from "./clickAt.js";
 import { recover } from "./recover.js";
 import { waitForDomStable } from "./domStability.js";
 import { dispatchKey, dispatchKeyCombo, type PressKeyArgs, type KeyComboArgs } from "./keyboard.js";
@@ -27,15 +41,20 @@ import { submitForm, type SubmitFormArgs } from "./formSubmit.js";
 import { waitFor, type WaitForArgs } from "./waitFor.js";
 import { evaluateV2, type EvaluateArgs } from "./evaluateV2.js";
 import { getPageState } from "./pageState.js";
+import { captureFingerprint } from "./domFingerprint.js";
+import { classifyFormFields } from "./formClassifier.js";
 import { extractText } from "./textExtractor.js";
 import { queryElements, buildElementInfo, scanElements } from "./elementScanner.js";
 import { scanActions } from "./actionScanner.js";
 import { startErrorBuffer } from "./browserErrorBuffer.js";
 import { startNetworkFailureBuffer } from "./networkFailureBuffer.js";
-import { resolveWithFallback } from "./elementResolver.js";
+import { resolveWithFallback, resolveWithFallbackSelfHealing } from "./elementResolver.js";
+import { withRetry, isRetryableError } from "./retryWrapper.js";
+import { rollback, type RollbackAction } from "./rollback.js";
 import { highlightElement, removeHighlights } from "./highlightOverlay.js";
-import { redactSensitiveValues } from "./redaction.js";
+import { redactSensitiveValues, redactPii } from "./redaction.js";
 import { showOverlay, updateOverlay } from "./automationOverlay.js";
+import { takeAnnotatedScreenshot } from "./annotatedScreenshot.js";
 
 // ---------------------------------------------------------------------------
 // Initialise observation buffers at module load
@@ -328,7 +347,74 @@ async function handleGetPageState(cmd: BridgeCommand): Promise<BridgeResponse> {
   if (typeof args.cursor === "string") stateArgs.cursor = args.cursor;
 
   const result = getPageState(stateArgs);
-  return buildResponse(cmd.id, cmd.tool, true, result, null, start);
+
+  // Phase 2 — semantic understanding augmentation
+  const fingerprint = captureFingerprint();
+  const semanticSnapshot = captureSemanticSnapshot();
+  const semanticSummary = {
+    modals: semanticSnapshot.modals.length,
+    dropdowns: semanticSnapshot.dropdowns.length,
+    forms: semanticSnapshot.forms.length,
+    toasts: semanticSnapshot.toasts.length,
+  };
+
+  // Update the stored snapshot so subsequent diffs have a baseline
+  setLastSemanticSnapshot(semanticSnapshot);
+
+  const augmentedResult = {
+    ...result,
+    fingerprint,
+    semanticSummary,
+  };
+
+  return buildResponse(cmd.id, cmd.tool, true, augmentedResult, null, start);
+}
+
+async function handleGetSemanticDiff(cmd: BridgeCommand): Promise<BridgeResponse> {
+  const start = performance.now();
+
+  const previous = getLastSemanticSnapshot();
+  const current = captureSemanticSnapshot();
+
+  let changes: SemanticChange[] = [];
+  if (previous) {
+    changes = computeSemanticChanges(previous, current);
+  }
+
+  // Always update the stored snapshot to the current state
+  setLastSemanticSnapshot(current);
+
+  return buildResponse(
+    cmd.id,
+    cmd.tool,
+    true,
+    { changes, hasBaseline: previous !== null },
+    null,
+    start,
+  );
+}
+
+async function handleClassifyForm(cmd: BridgeCommand): Promise<BridgeResponse> {
+  const start = performance.now();
+  const args = cmd.args as Record<string, unknown>;
+
+  let elements: Array<ElementInfo> = [];
+
+  if (Array.isArray(args.elements)) {
+    elements = args.elements as ElementInfo[];
+  } else {
+    // If no elements provided, scan the page for inputs
+    const scanResult = scanElements({
+      maxElements: 300,
+      includeBoundingBoxes: false,
+      maxTextPerElement: 160,
+    });
+    elements = scanResult.elements;
+  }
+
+  const fields = classifyFormFields(elements);
+
+  return buildResponse(cmd.id, cmd.tool, true, { fields }, null, start);
 }
 
 async function handleExtractText(cmd: BridgeCommand): Promise<BridgeResponse> {
@@ -437,49 +523,80 @@ async function handleClickRef(cmd: BridgeCommand): Promise<BridgeResponse> {
     );
   }
 
-  const el = resolveWithFallback(target);
-  if (!el) {
+  try {
+    const result = await withRetry(
+      async () => {
+        const resolved = resolveWithFallbackSelfHealing(target);
+        if (!resolved.element) {
+          const err = new Error("STALE_ELEMENT");
+          Object.assign(err, { code: "STALE_ELEMENT" });
+          throw err;
+        }
+        const res = await performAction(
+          "click_ref",
+          resolved.element,
+          () => {
+            const htmlEl = resolved.element instanceof HTMLElement ? resolved.element : null;
+            if (htmlEl) {
+              htmlEl.click();
+            } else {
+              resolved.element!.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+            }
+          },
+          {
+            waitAfter:
+              (args.waitAfter as WaitAfterPolicy | undefined) ?? {
+                domStable: true,
+                quietMs: 300,
+                timeoutMs: 3000,
+              },
+            returnDiff: args.returnDiff === true,
+          },
+        );
+        if (!res.success) {
+          const code = res.timedOut ? "DOM_STABLE_TIMEOUT" : (res.error ?? "UNKNOWN_ERROR");
+          const err = new Error(code);
+          Object.assign(err, { code, result: res });
+          throw err;
+        }
+        return res;
+      },
+      {},
+      isRetryableError,
+    );
+
+    const finalResult: ActionResultWithOptionalState = result;
+    if (args.returnPageState === true) {
+      finalResult.pageState = getPageState({});
+    }
+
+    return buildResponse(cmd.id, cmd.tool, result.success, finalResult, null, start);
+  } catch (err) {
+    await rollback([{ type: "close_modal" }]);
+
+    const result = (err as Record<string, unknown>)?.result as ActionResult | undefined;
+    const finalResult: ActionResultWithOptionalState = result ?? { action: "click_ref", success: false };
+    if (args.returnPageState === true) {
+      finalResult.pageState = getPageState({});
+    }
+
     return buildResponse(
       cmd.id,
       cmd.tool,
       false,
-      null,
-      createBridgeError("STALE_ELEMENT", "Element not found", {
-        recoverable: true,
-        suggestedNextTools: ["find_element", "get_page_state"],
-      }),
+      finalResult,
+      createBridgeError(
+        ((err as Record<string, unknown>)?.code as BridgeErrorCode) ?? "UNKNOWN_ERROR",
+        err instanceof Error ? err.message : "Action failed after retries",
+        {
+          recoverable: true,
+          suggestedNextTools: ["recover", "get_page_state"],
+          details: { preScreenshot: finalResult.preScreenshot },
+        },
+      ),
       start,
     );
   }
-
-  const result = await performAction(
-    "click_ref",
-    el,
-    () => {
-      const htmlEl = el instanceof HTMLElement ? el : null;
-      if (htmlEl) {
-        htmlEl.click();
-      } else {
-        el.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
-      }
-    },
-    {
-      waitAfter:
-        (args.waitAfter as WaitAfterPolicy | undefined) ?? {
-          domStable: true,
-          quietMs: 300,
-          timeoutMs: 3000,
-        },
-      returnDiff: args.returnDiff === true,
-    },
-  );
-
-  const finalResult: ActionResultWithOptionalState = result;
-  if (args.returnPageState === true) {
-    finalResult.pageState = getPageState({});
-  }
-
-  return buildResponse(cmd.id, cmd.tool, result.success, finalResult, null, start);
 }
 
 async function handleHighlight(cmd: BridgeCommand): Promise<BridgeResponse> {
@@ -702,7 +819,95 @@ async function handleRecover(cmd: BridgeCommand): Promise<BridgeResponse> {
   return buildResponse(cmd.id, cmd.tool, true, result, null, start);
 }
 
-async function handleFill(cmd: BridgeCommand): Promise<BridgeResponse> {
+async function handleRollback(cmd: BridgeCommand): Promise<BridgeResponse> {
+  const start = performance.now();
+  const args = cmd.args as Record<string, unknown>;
+  const actions = Array.isArray(args.actions) ? (args.actions as RollbackAction[]) : [];
+
+  const success = await rollback(actions);
+
+  const result: ActionResult = {
+    action: "rollback",
+    success,
+  };
+
+  return buildResponse(cmd.id, cmd.tool, success, result, null, start);
+}
+
+async function handleScrollTo(cmd: BridgeCommand): Promise<BridgeResponse> {
+  const start = performance.now();
+  const args = cmd.args as Record<string, unknown>;
+  const target = args.target as { ref?: string; selector?: string } | "active" | undefined;
+
+  const scrollArgs: ScrollToArgs = {};
+  if (args.behavior === "smooth" || args.behavior === "auto") scrollArgs.behavior = args.behavior;
+  if (args.block === "start" || args.block === "center" || args.block === "end" || args.block === "nearest") scrollArgs.block = args.block;
+  if (args.inline === "start" || args.inline === "center" || args.inline === "end" || args.inline === "nearest") scrollArgs.inline = args.inline;
+  if (typeof args.x === "number") scrollArgs.x = args.x;
+  if (typeof args.y === "number") scrollArgs.y = args.y;
+
+  if (target === undefined && scrollArgs.x === undefined && scrollArgs.y === undefined) {
+    return buildResponse(
+      cmd.id,
+      cmd.tool,
+      false,
+      null,
+      createBridgeError("INVALID_ARGUMENT", "Missing target or x/y offset"),
+      start,
+    );
+  }
+
+  if (target === undefined || target === "active") {
+    if (scrollArgs.x !== undefined || scrollArgs.y !== undefined) {
+      const result = scrollByOffset(scrollArgs);
+      return buildResponse(cmd.id, cmd.tool, result.success, result, null, start);
+    }
+    return buildResponse(
+      cmd.id,
+      cmd.tool,
+      false,
+      null,
+      createBridgeError("INVALID_ARGUMENT", "Missing target or x/y offset"),
+      start,
+    );
+  }
+
+  const el = resolveWithFallback(target as TargetRef);
+  if (!el) {
+    return buildResponse(
+      cmd.id,
+      cmd.tool,
+      false,
+      null,
+      createBridgeError("STALE_ELEMENT", "Element not found", {
+        recoverable: true,
+        suggestedNextTools: ["find_element", "get_page_state"],
+      }),
+      start,
+    );
+  }
+
+  const result = scrollToElement(el, scrollArgs);
+  return buildResponse(cmd.id, cmd.tool, result.success, result, null, start);
+}
+
+async function handleClickAt(cmd: BridgeCommand): Promise<BridgeResponse> {
+  const start = performance.now();
+  const args = cmd.args as Record<string, unknown>;
+
+  const x = typeof args.x === "number" ? args.x : 0;
+  const y = typeof args.y === "number" ? args.y : 0;
+  const button =
+    args.button === "right" || args.button === "middle"
+      ? args.button
+      : "left";
+  const clickCount = typeof args.clickCount === "number" ? args.clickCount : 1;
+
+  const result = clickAt({ x, y, button, clickCount });
+  return buildResponse(cmd.id, cmd.tool, result.success, result, null, start);
+}
+
+async function handleHover(cmd: BridgeCommand): Promise<BridgeResponse> {
   const start = performance.now();
   const args = cmd.args as Record<string, unknown>;
   const target = args.target as TargetRef | undefined;
@@ -733,6 +938,123 @@ async function handleFill(cmd: BridgeCommand): Promise<BridgeResponse> {
     );
   }
 
+  const result = hoverElement(el);
+  return buildResponse(cmd.id, cmd.tool, result.success, result, null, start);
+}
+
+async function handleSelectOption(cmd: BridgeCommand): Promise<BridgeResponse> {
+  const start = performance.now();
+  const args = cmd.args as Record<string, unknown>;
+  const target = args.target as TargetRef | undefined;
+
+  if (!target || typeof target !== "object") {
+    return buildResponse(
+      cmd.id,
+      cmd.tool,
+      false,
+      null,
+      createBridgeError("ELEMENT_NOT_FOUND", "Missing target"),
+      start,
+    );
+  }
+
+  const selectArgs: SelectOptionArgs = { target };
+  if (Array.isArray(args.values)) selectArgs.values = args.values as string[];
+  if (Array.isArray(args.labels)) selectArgs.labels = args.labels as string[];
+  if (Array.isArray(args.indices)) selectArgs.indices = args.indices as number[];
+  if (typeof args.clear === "boolean") selectArgs.clear = args.clear;
+
+  try {
+    const result = await withRetry(
+      async () => {
+        const resolved = resolveWithFallbackSelfHealing(target);
+        if (!resolved.element) {
+          const err = new Error("STALE_ELEMENT");
+          Object.assign(err, { code: "STALE_ELEMENT" });
+          throw err;
+        }
+        const res = await performAction(
+          "select_option",
+          resolved.element,
+          () => {
+            const r = selectOption(resolved.element!, selectArgs);
+            if (!r.success) {
+              throw new Error(r.matched === 0 ? "NO_OPTIONS_MATCHED" : "SELECT_FAILED");
+            }
+            return { matched: r.matched };
+          },
+          {
+            waitAfter:
+              (args.waitAfter as WaitAfterPolicy | undefined) ?? {
+                domStable: true,
+                quietMs: 300,
+                timeoutMs: 3000,
+              },
+            returnDiff: args.returnDiff === true,
+          },
+        );
+        if (!res.success) {
+          const code = res.timedOut ? "DOM_STABLE_TIMEOUT" : (res.error ?? "UNKNOWN_ERROR");
+          const err = new Error(code);
+          Object.assign(err, { code, result: res });
+          throw err;
+        }
+        return res;
+      },
+      {},
+      isRetryableError,
+    );
+
+    const finalResult: ActionResultWithOptionalState = result;
+    if (args.returnPageState === true) {
+      finalResult.pageState = getPageState({});
+    }
+
+    return buildResponse(cmd.id, cmd.tool, result.success, finalResult, null, start);
+  } catch (err) {
+    await rollback([{ type: "undo_fill", target }]);
+
+    const result = (err as Record<string, unknown>)?.result as ActionResult | undefined;
+    const finalResult: ActionResultWithOptionalState = result ?? { action: "select_option", success: false };
+    if (args.returnPageState === true) {
+      finalResult.pageState = getPageState({});
+    }
+
+    return buildResponse(
+      cmd.id,
+      cmd.tool,
+      false,
+      finalResult,
+      createBridgeError(
+        ((err as Record<string, unknown>)?.code as BridgeErrorCode) ?? "UNKNOWN_ERROR",
+        err instanceof Error ? err.message : "Action failed after retries",
+        {
+          recoverable: true,
+          suggestedNextTools: ["recover", "get_page_state"],
+          details: { preScreenshot: finalResult.preScreenshot },
+        },
+      ),
+      start,
+    );
+  }
+}
+
+async function handleFill(cmd: BridgeCommand): Promise<BridgeResponse> {
+  const start = performance.now();
+  const args = cmd.args as Record<string, unknown>;
+  const target = args.target as TargetRef | undefined;
+
+  if (!target || typeof target !== "object") {
+    return buildResponse(
+      cmd.id,
+      cmd.tool,
+      false,
+      null,
+      createBridgeError("ELEMENT_NOT_FOUND", "Missing target"),
+      start,
+    );
+  }
+
   if (typeof args.value !== "string") {
     return buildResponse(
       cmd.id,
@@ -746,29 +1068,75 @@ async function handleFill(cmd: BridgeCommand): Promise<BridgeResponse> {
   const value = args.value;
   const clear = args.clear !== false;
 
-  const result = await performAction(
-    "fill",
-    el,
-    () => {
-      fillElement(el, value, clear);
-    },
-    {
-      waitAfter:
-        (args.waitAfter as WaitAfterPolicy | undefined) ?? {
-          domStable: true,
-          quietMs: 300,
-          timeoutMs: 3000,
+  try {
+    const result = await withRetry(
+      async () => {
+        const resolved = resolveWithFallbackSelfHealing(target);
+        if (!resolved.element) {
+          const err = new Error("STALE_ELEMENT");
+          Object.assign(err, { code: "STALE_ELEMENT" });
+          throw err;
+        }
+        const res = await performAction(
+          "fill",
+          resolved.element,
+          () => {
+            fillElement(resolved.element!, value, clear);
+          },
+          {
+            waitAfter:
+              (args.waitAfter as WaitAfterPolicy | undefined) ?? {
+                domStable: true,
+                quietMs: 300,
+                timeoutMs: 3000,
+              },
+            returnDiff: args.returnDiff === true,
+          },
+        );
+        if (!res.success) {
+          const code = res.timedOut ? "DOM_STABLE_TIMEOUT" : (res.error ?? "UNKNOWN_ERROR");
+          const err = new Error(code);
+          Object.assign(err, { code, result: res });
+          throw err;
+        }
+        return res;
+      },
+      {},
+      isRetryableError,
+    );
+
+    const finalResult: ActionResultWithOptionalState = result;
+    if (args.returnPageState === true) {
+      finalResult.pageState = getPageState({});
+    }
+
+    return buildResponse(cmd.id, cmd.tool, result.success, finalResult, null, start);
+  } catch (err) {
+    await rollback([{ type: "undo_fill", target }]);
+
+    const result = (err as Record<string, unknown>)?.result as ActionResult | undefined;
+    const finalResult: ActionResultWithOptionalState = result ?? { action: "fill", success: false };
+    if (args.returnPageState === true) {
+      finalResult.pageState = getPageState({});
+    }
+
+    return buildResponse(
+      cmd.id,
+      cmd.tool,
+      false,
+      finalResult,
+      createBridgeError(
+        ((err as Record<string, unknown>)?.code as BridgeErrorCode) ?? "UNKNOWN_ERROR",
+        err instanceof Error ? err.message : "Action failed after retries",
+        {
+          recoverable: true,
+          suggestedNextTools: ["recover", "get_page_state"],
+          details: { preScreenshot: finalResult.preScreenshot },
         },
-      returnDiff: args.returnDiff === true,
-    },
-  );
-
-  const finalResult: ActionResultWithOptionalState = result;
-  if (args.returnPageState === true) {
-    finalResult.pageState = getPageState({});
+      ),
+      start,
+    );
   }
-
-  return buildResponse(cmd.id, cmd.tool, result.success, finalResult, null, start);
 }
 
 // ---------------------------------------------------------------------------
@@ -828,6 +1196,91 @@ async function handleCaptureScreenshot(cmd: BridgeCommand): Promise<BridgeRespon
   return buildResponse(cmd.id, cmd.tool, true, { screenshot: result.screenshot, format: "jpeg" }, null, start);
 }
 
+async function handleAnnotatedScreenshot(cmd: BridgeCommand): Promise<BridgeResponse> {
+  const start = performance.now();
+  const args = cmd.args as Record<string, unknown>;
+
+  try {
+    const opts: { maxElements?: number; drawLabels?: boolean; tabId?: number } = {};
+    if (typeof args.maxElements === "number") opts.maxElements = args.maxElements;
+    if (typeof args.drawLabels === "boolean") opts.drawLabels = args.drawLabels;
+    if (typeof cmd.tabId === "number") opts.tabId = cmd.tabId;
+    const result = await takeAnnotatedScreenshot(opts);
+    return buildResponse(cmd.id, cmd.tool, true, result, null, start);
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err);
+    return buildResponse(
+      cmd.id,
+      cmd.tool,
+      false,
+      null,
+      createBridgeError("SCREENSHOT_ERROR", message, { recoverable: true }),
+      start,
+    );
+  }
+}
+
+async function handleStartRecording(cmd: BridgeCommand): Promise<BridgeResponse> {
+  const start = performance.now();
+  const tabId = typeof cmd.tabId === "number" ? cmd.tabId : undefined;
+  const result = await sendToBackground<{ success: boolean; startTime?: number; error?: string }>({
+    type: "start_recording",
+    tabId,
+  });
+  if (!result.success) {
+    return buildResponse(
+      cmd.id,
+      cmd.tool,
+      false,
+      null,
+      { code: "RECORDING_ERROR", message: result.error ?? "Failed to start recording", recoverable: true },
+      start,
+    );
+  }
+  return buildResponse(cmd.id, cmd.tool, true, { recording: true, startTime: result.startTime }, null, start);
+}
+
+async function handleStopRecording(cmd: BridgeCommand): Promise<BridgeResponse> {
+  const start = performance.now();
+  const result = await sendToBackground<{
+    success: boolean;
+    base64?: string;
+    durationMs?: number;
+    tabId?: number;
+    sizeBytes?: number;
+    error?: string;
+  }>({
+    type: "stop_recording",
+  });
+  if (!result.success || !result.base64) {
+    return buildResponse(
+      cmd.id,
+      cmd.tool,
+      false,
+      null,
+      { code: "RECORDING_ERROR", message: result.error ?? "Failed to stop recording", recoverable: true },
+      start,
+    );
+  }
+  return buildResponse(cmd.id, cmd.tool, true, { base64: result.base64, durationMs: result.durationMs, sizeBytes: result.sizeBytes, tabId: result.tabId, format: "webm" }, null, start);
+}
+
+async function handleGetAuditLog(cmd: BridgeCommand): Promise<BridgeResponse> {
+  const start = performance.now();
+  const result = await sendToBackground<{ success: boolean; entries?: unknown[]; error?: string }>({
+    type: "get_audit_log",
+  });
+  return buildResponse(cmd.id, cmd.tool, result.success, { entries: result.entries }, null, start);
+}
+
+async function handleClearAuditLog(cmd: BridgeCommand): Promise<BridgeResponse> {
+  const start = performance.now();
+  const result = await sendToBackground<{ success: boolean; error?: string }>({
+    type: "clear_audit_log",
+  });
+  return buildResponse(cmd.id, cmd.tool, result.success, { cleared: result.success }, null, start);
+}
+
 // ---------------------------------------------------------------------------
 // Dispatch table
 // ---------------------------------------------------------------------------
@@ -840,6 +1293,8 @@ const handlers = new Map<string, CommandHandler>([
   ["wait_for", handleWaitFor],
   ["evaluate_v2", handleEvaluateV2],
   ["get_page_state", handleGetPageState],
+  ["get_semantic_diff", handleGetSemanticDiff],
+  ["classify_form", handleClassifyForm],
   ["extract_text", handleExtractText],
   ["get_full_text", handleGetFullText],
   ["query_elements", handleQueryElements],
@@ -848,14 +1303,24 @@ const handlers = new Map<string, CommandHandler>([
   ["find_element", handleFindElement],
   ["describe_element", handleDescribeElement],
   ["list_actions", handleListActions],
+  ["scroll_to", handleScrollTo],
+  ["click_at", handleClickAt],
+  ["hover", handleHover],
+  ["select_option", handleSelectOption],
   ["fill", handleFill],
   ["recover", handleRecover],
+  ["rollback", handleRollback],
   ["get_bridge_status", handleGetBridgeStatus],
   ["set_policy", handleSetPolicy],
   ["start_trace", handleStartTrace],
   ["stop_trace", handleStopTrace],
   ["get_last_trace", handleGetLastTrace],
   ["capture_screenshot", handleCaptureScreenshot],
+  ["annotated_screenshot", handleAnnotatedScreenshot],
+  ["start_recording", handleStartRecording],
+  ["stop_recording", handleStopRecording],
+  ["get_audit_log", handleGetAuditLog],
+  ["clear_audit_log", handleClearAuditLog],
 ]);
 
 // ---------------------------------------------------------------------------
@@ -898,7 +1363,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       ok: false,
       tool: typeof cmd.tool === "string" ? cmd.tool : "unknown",
       result: null,
-      error: createBridgeError("UNKNOWN_ERROR", "Malformed command envelope", {
+      error: createBridgeError("UNKNOWN_ERROR", redactPii("Malformed command envelope"), {
         recoverable: true,
       }),
       warnings: [],
@@ -910,10 +1375,13 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   dispatchCommand(cmd)
     .then((response) => {
       const redacted = redactSensitiveValues(response) as BridgeResponse;
+      if (redacted.error && redacted.error.message) {
+        redacted.error = { ...redacted.error, message: redactPii(redacted.error.message) };
+      }
       sendResponse(redacted);
     })
     .catch((err: unknown) => {
-      const msg = err instanceof Error ? err.message : String(err);
+      const msg = redactPii(err instanceof Error ? err.message : String(err));
       sendResponse({
         v: "2.0",
         id: cmd.id,

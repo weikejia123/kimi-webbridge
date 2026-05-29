@@ -4,10 +4,12 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && npm run build:content",
+    "build:content": "npx esbuild src/content/index.ts --bundle --outfile=dist/content/index.js --format=iife --platform=browser --target=es2022",
     "dev": "tsc --watch",
     "watch": "tsc --watch",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "node --test tests/*.test.mjs"
   },
   "devDependencies": {
     "@types/chrome": "^0.0.268",

@@ -12,6 +12,12 @@ import { createBridgeError } from "../shared/errors.js";
 import { getStatus, setPolicy, setConnectionState, recordHeartbeat, setTracesActive } from "./status.js";
 import { checkPolicyBeforeAction } from "./policy.js";
 import { TraceStore, captureTraceScreenshot } from "./trace.js";
+import { startRecording, stopRecording, getRecordingStatus, getPartialBlob } from "./recording.js";
+import { handleNavigate, handleReload, handleListTabs, handleSwitchTab } from "./browserActions.js";
+import { logAction, getAuditLog, clearAuditLog } from "./auditLog.js";
+import { redactPii } from "./piiRedaction.js";
+import { checkRateLimit } from "./rateLimiter.js";
+import { checkDomainPermission } from "./permissionModel.js";
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -171,7 +177,7 @@ function scheduleReconnect(): void {
   }, delay);
 }
 
-function sendToDaemon(response: BridgeResponse): void {
+function sendToDaemon(response: BridgeResponse, correlationId?: string): void {
   if (ws === null || ws.readyState !== WebSocket.OPEN) {
     console.warn(
       "[Fahd's WebBridge] Cannot send response; WebSocket not open",
@@ -179,7 +185,10 @@ function sendToDaemon(response: BridgeResponse): void {
     return;
   }
   try {
-    ws.send(JSON.stringify(response));
+    const payload = correlationId !== undefined
+      ? { requestId: correlationId, response }
+      : response;
+    ws.send(JSON.stringify(payload));
   } catch (err) {
     console.error("[Fahd's WebBridge] Failed to send response:", err);
   }
@@ -220,6 +229,7 @@ async function handleDaemonMessage(data: unknown): Promise<void> {
   }
 
   const msg = parsed as Record<string, unknown>;
+  const correlationId = typeof msg.requestId === "string" ? msg.requestId : undefined;
 
   // Ignore non-command frames (e.g. registration acks).
   if (typeof msg.id !== "string" || typeof msg.tool !== "string") {
@@ -264,6 +274,65 @@ async function handleDaemonMessage(data: unknown): Promise<void> {
     return;
   }
 
+  // Browser-level actions are handled directly by the service worker.
+  if (cmd.tool === "navigate") {
+    const response = await handleNavigate(cmd);
+    sendToDaemon(response, correlationId);
+    return;
+  }
+  if (cmd.tool === "reload") {
+    const response = await handleReload(cmd);
+    sendToDaemon(response, correlationId);
+    return;
+  }
+  if (cmd.tool === "list_tabs") {
+    const response = await handleListTabs(cmd);
+    sendToDaemon(response, correlationId);
+    return;
+  }
+  if (cmd.tool === "switch_tab") {
+    const response = await handleSwitchTab(cmd);
+    sendToDaemon(response, correlationId);
+    return;
+  }
+
+  // Audit log commands are handled directly by the service worker.
+  if (cmd.tool === "get_audit_log") {
+    const start = Date.now();
+    const args = cmd.args as Record<string, unknown>;
+    const filter: Parameters<typeof getAuditLog>[0] = {};
+    if (typeof args.tabId === "number") filter.tabId = args.tabId;
+    if (typeof args.since === "number") filter.since = args.since;
+    if (typeof args.tool === "string") filter.tool = args.tool;
+    const entries = await getAuditLog(filter);
+    sendToDaemon({
+      v: "2.0",
+      id: cmd.id,
+      ok: true,
+      tool: cmd.tool,
+      result: { entries, count: entries.length },
+      error: null,
+      warnings: [],
+      telemetry: { durationMs: Date.now() - start },
+    }, correlationId);
+    return;
+  }
+  if (cmd.tool === "clear_audit_log") {
+    const start = Date.now();
+    await clearAuditLog();
+    sendToDaemon({
+      v: "2.0",
+      id: cmd.id,
+      ok: true,
+      tool: cmd.tool,
+      result: { cleared: true },
+      error: null,
+      warnings: [],
+      telemetry: { durationMs: Date.now() - start },
+    }, correlationId);
+    return;
+  }
+
   // Verify the tab exists before attempting to message it.
   let tab: chrome.tabs.Tab;
   try {
@@ -305,10 +374,86 @@ async function handleDaemonMessage(data: unknown): Promise<void> {
     return;
   }
 
+  // Domain permission check
+  const domainCheck = checkDomainPermission(tab.url ?? "");
+  if (!domainCheck.allowed) {
+    sendToDaemon({
+      v: "2.0",
+      id: cmd.id,
+      ok: false,
+      tool: cmd.tool,
+      result: null,
+      error: createBridgeError(
+        "PERMISSION_DENIED",
+        domainCheck.reason ?? "Domain not permitted",
+      ),
+      warnings: [],
+      telemetry: { durationMs: 0 },
+    });
+    return;
+  }
+
+  // Rate limit check
+  const rateCheck = checkRateLimit(tabId);
+  if (!rateCheck.allowed) {
+    sendToDaemon({
+      v: "2.0",
+      id: cmd.id,
+      ok: false,
+      tool: cmd.tool,
+      result: null,
+      error: createBridgeError(
+        "PERMISSION_DENIED",
+        `Rate limit exceeded; retry after ${rateCheck.retryAfterMs}ms`,
+      ),
+      warnings: [],
+      telemetry: { durationMs: 0 },
+    });
+    return;
+  }
+
   const cmdStart = Date.now();
   try {
+    // Ensure content script is present; inject if missing.
+    const injected = await ensureContentScriptInjected(tabId);
+    if (!injected) {
+      sendToDaemon({
+        v: "2.0",
+        id: cmd.id,
+        ok: false,
+        tool: cmd.tool,
+        result: null,
+        error: createBridgeError(
+          "UNKNOWN_ERROR",
+          "Content script not available and injection failed",
+          { recoverable: true },
+        ),
+        warnings: [],
+        telemetry: { durationMs: Date.now() - cmdStart },
+      }, correlationId);
+      return;
+    }
+
     const response = await routeToContentScript(tabId, cmd.frameId, cmd);
-    sendToDaemon(response);
+    sendToDaemon(response, correlationId);
+
+    // Fire-and-forget audit log
+    const redactedArgs: Record<string, unknown> = {};
+    if (cmd.args && typeof cmd.args === "object") {
+      for (const [key, value] of Object.entries(cmd.args as Record<string, unknown>)) {
+        redactedArgs[key] = typeof value === "string" ? redactPii(value) : value;
+      }
+    }
+    void logAction({
+      timestamp: Date.now(),
+      tabId,
+      url: tab.url ?? "",
+      tool: cmd.tool,
+      args: redactedArgs,
+      success: response.ok,
+      errorCode: response.error?.code,
+      durationMs: Date.now() - cmdStart,
+    });
 
     if (traceStore.isActive()) {
       traceStore.add({
@@ -339,13 +484,68 @@ async function handleDaemonMessage(data: unknown): Promise<void> {
       ok: false,
       tool: cmd.tool,
       result: null,
-      error: createBridgeError("UNKNOWN_ERROR", message, {
+      error: createBridgeError("UNKNOWN_ERROR", redactPii(message), {
         recoverable: true,
       }),
       warnings: [],
       telemetry: { durationMs: 0 },
+    }, correlationId);
+    // Fire-and-forget audit log for exception
+    const exceptionRedactedArgs: Record<string, unknown> = {};
+    if (cmd.args && typeof cmd.args === "object") {
+      for (const [key, value] of Object.entries(cmd.args as Record<string, unknown>)) {
+        exceptionRedactedArgs[key] = typeof value === "string" ? redactPii(value) : value;
+      }
+    }
+    void logAction({
+      timestamp: Date.now(),
+      tabId,
+      url: tab.url ?? "",
+      tool: cmd.tool,
+      args: exceptionRedactedArgs,
+      success: false,
+      errorCode: "UNKNOWN_ERROR",
+      durationMs: Date.now() - cmdStart,
     });
   }
+}
+
+/**
+ * Wait for the manifest-injected content script to be ready.
+ * We do NOT use chrome.scripting.executeScript with files here because
+ * that injects into the MAIN world, not the isolated content-script world,
+ * so chrome.tabs.sendMessage would still fail with "Receiving end does not exist."
+ * The manifest already auto-injects the content script at document_idle.
+ */
+async function ensureContentScriptInjected(tabId: number): Promise<boolean> {
+  const maxRetries = 5;
+  const retryDelayMs = 200;
+
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
+    try {
+      const ok = await new Promise<boolean>((resolve) => {
+        chrome.tabs.sendMessage(
+          tabId,
+          { v: "2.0", id: `ping-${Date.now()}`, tool: "ping", args: {} },
+          () => {
+            const lastErr = chrome.runtime.lastError;
+            if (lastErr) {
+              resolve(false);
+            } else {
+              resolve(true);
+            }
+          },
+        );
+      });
+      if (ok) return true;
+    } catch {
+      /* ignore */
+    }
+    if (attempt < maxRetries - 1) {
+      await new Promise((r) => self.setTimeout(r, retryDelayMs));
+    }
+  }
+  return false;
 }
 
 function routeToContentScript(
@@ -522,6 +722,9 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
           find_element: true,
           describe_element: true,
           list_actions: true,
+          select_option: true,
+          scroll_to: true,
+          hover: true,
           fill: true,
           recover: true,
           get_bridge_status: true,
@@ -530,6 +733,9 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
           stop_trace: true,
           get_last_trace: true,
           capture_screenshot: true,
+          annotated_screenshot: true,
+          start_recording: true,
+          stop_recording: true,
         },
       };
       sendResponse(status);
@@ -582,6 +788,90 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         const message = err instanceof Error ? err.message : String(err);
         sendResponse({ success: false, error: message });
       }
+    })();
+    return true;
+  }
+
+  if (type === "start_recording") {
+    void (async (): Promise<void> => {
+      const targetTabId =
+        typeof msg.tabId === "number" ? msg.tabId : activeTabId ?? undefined;
+      if (targetTabId === undefined) {
+        sendResponse({ success: false, error: "No active tab" });
+        return;
+      }
+      try {
+        const startTime = await startRecording(targetTabId);
+        sendResponse({ success: true, startTime });
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        sendResponse({ success: false, error: message });
+      }
+    })();
+    return true;
+  }
+
+  if (type === "stop_recording") {
+    void (async (): Promise<void> => {
+      try {
+        const { blob, durationMs, tabId } = await stopRecording();
+        // Convert blob to base64 for transmission
+        const reader = new FileReader();
+        reader.onloadend = () => {
+          const base64 = (reader.result as string).split(",")[1] ?? "";
+          sendResponse({ success: true, base64, durationMs, tabId, sizeBytes: blob.size });
+        };
+        reader.onerror = () => {
+          sendResponse({ success: false, error: "Failed to read recording blob" });
+        };
+        reader.readAsDataURL(blob);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        sendResponse({ success: false, error: message });
+      }
+    })();
+    return true;
+  }
+
+  if (type === "get_recording_status") {
+    sendResponse({ success: true, status: getRecordingStatus() });
+    return false;
+  }
+
+  if (type === "get_recording_partial") {
+    const blob = getPartialBlob();
+    if (!blob) {
+      sendResponse({ success: false, error: "No recording in progress" });
+      return false;
+    }
+    const reader = new FileReader();
+    reader.onloadend = () => {
+      const base64 = (reader.result as string).split(",")[1] ?? "";
+      sendResponse({ success: true, base64, sizeBytes: blob.size });
+    };
+    reader.onerror = () => {
+      sendResponse({ success: false, error: "Failed to read partial blob" });
+    };
+    reader.readAsDataURL(blob);
+    return true;
+  }
+
+  if (type === "get_audit_log") {
+    void (async (): Promise<void> => {
+      const filter: Parameters<typeof getAuditLog>[0] = {};
+      if (typeof msg.tabId === "number") filter.tabId = msg.tabId;
+      if (typeof msg.since === "number") filter.since = msg.since;
+      if (typeof msg.tool === "string") filter.tool = msg.tool;
+      const entries = await getAuditLog(filter);
+      sendResponse({ success: true, entries, count: entries.length });
+    })();
+    return true;
+  }
+
+  if (type === "clear_audit_log") {
+    void (async (): Promise<void> => {
+      await clearAuditLog();
+      sendResponse({ success: true, cleared: true });
     })();
     return true;
   }
@@ -685,7 +975,7 @@ chrome.runtime.onMessageExternal.addListener(
             result: null,
             error: createBridgeError(
               "PERMISSION_DENIED",
-              policyCheck.reason ?? "Action blocked by policy",
+              redactPii(policyCheck.reason ?? "Action blocked by policy"),
             ),
             warnings: [],
             telemetry: { durationMs: 0 },
@@ -693,8 +983,71 @@ chrome.runtime.onMessageExternal.addListener(
           return;
         }
 
+        let tabUrl = "";
+        try {
+          const tab = await chrome.tabs.get(tabId);
+          tabUrl = tab.url ?? "";
+        } catch {
+          /* ignore */
+        }
+
+        const domainCheck = checkDomainPermission(tabUrl);
+        if (!domainCheck.allowed) {
+          sendResponse({
+            v: "2.0",
+            id: cmd.id,
+            ok: false,
+            tool: cmd.tool,
+            result: null,
+            error: createBridgeError(
+              "PERMISSION_DENIED",
+              redactPii(domainCheck.reason ?? "Domain not permitted"),
+            ),
+            warnings: [],
+            telemetry: { durationMs: 0 },
+          });
+          return;
+        }
+
+        const rateCheck = checkRateLimit(tabId);
+        if (!rateCheck.allowed) {
+          sendResponse({
+            v: "2.0",
+            id: cmd.id,
+            ok: false,
+            tool: cmd.tool,
+            result: null,
+            error: createBridgeError(
+              "PERMISSION_DENIED",
+              redactPii(`Rate limit exceeded; retry after ${rateCheck.retryAfterMs}ms`),
+            ),
+            warnings: [],
+            telemetry: { durationMs: 0 },
+          });
+          return;
+        }
+
+        const extStart = Date.now();
         routeToContentScript(tabId, cmd.frameId, cmd)
-          .then(sendResponse)
+          .then((response) => {
+            sendResponse(response);
+            const v1RedactedArgs: Record<string, unknown> = {};
+            if (cmd.args && typeof cmd.args === "object") {
+              for (const [key, value] of Object.entries(cmd.args as Record<string, unknown>)) {
+                v1RedactedArgs[key] = typeof value === "string" ? redactPii(value) : value;
+              }
+            }
+            void logAction({
+              timestamp: Date.now(),
+              tabId,
+              url: tabUrl,
+              tool: cmd.tool,
+              args: v1RedactedArgs,
+              success: response.ok,
+              errorCode: response.error?.code,
+              durationMs: Date.now() - extStart,
+            });
+          })
           .catch((err: unknown) => {
             const msg = err instanceof Error ? err.message : String(err);
             sendResponse({
@@ -703,11 +1056,27 @@ chrome.runtime.onMessageExternal.addListener(
               ok: false,
               tool: cmd.tool,
               result: null,
-              error: createBridgeError("UNKNOWN_ERROR", msg, {
+              error: createBridgeError("UNKNOWN_ERROR", redactPii(msg), {
                 recoverable: true,
               }),
               warnings: [],
               telemetry: { durationMs: 0 },
+            });
+            const v1ErrRedactedArgs: Record<string, unknown> = {};
+            if (cmd.args && typeof cmd.args === "object") {
+              for (const [key, value] of Object.entries(cmd.args as Record<string, unknown>)) {
+                v1ErrRedactedArgs[key] = typeof value === "string" ? redactPii(value) : value;
+              }
+            }
+            void logAction({
+              timestamp: Date.now(),
+              tabId,
+              url: tabUrl,
+              tool: cmd.tool,
+              args: v1ErrRedactedArgs,
+              success: false,
+              errorCode: "UNKNOWN_ERROR",
+              durationMs: Date.now() - extStart,
             });
           });
       })();

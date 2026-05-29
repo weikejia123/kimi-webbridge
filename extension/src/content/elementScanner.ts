@@ -9,8 +9,14 @@ import { isVisible } from "./actionRuntime.js";
 import { elementRegistry } from "./elementRegistry.js";
 import { computeBridgeName } from "./nameInference.js";
 
+// Expanded selector includes Bootstrap dropdown patterns (.dropdown-menu a, .dropdown-item,
+// [data-toggle="dropdown"]) and common ARIA roles so dynamically-appended menus are not missed.
 const INTERACTIVE_SELECTOR =
-  'a, button, input, textarea, select, [role="button"], [role="link"], [role="checkbox"], [role="radio"], [contenteditable="true"]';
+  'a, button, input, textarea, select, label, [contenteditable="true"], ' +
+  '[role="button"], [role="link"], [role="checkbox"], [role="radio"], ' +
+  '[role="menuitem"], [role="tab"], [role="switch"], [role="menuitemcheckbox"], ' +
+  '[role="menuitemradio"], [role="option"], [role="treeitem"], ' +
+  '.dropdown-menu a, .dropdown-item, [data-toggle="dropdown"], [aria-haspopup="true"]';
 
 export function buildSelector(el: Element): string {
   if (el.id) return `#${CSS.escape(el.id)}`;
@@ -123,7 +129,7 @@ export function scanElements(opts: {
   truncated: boolean;
   nextCursor?: number;
 } {
-  const maxElements = opts.maxElements ?? 300;
+  const maxElements = opts.maxElements ?? 800;
   const cursor = opts.cursor ?? 0;
 
   const allEls = Array.from(document.querySelectorAll(INTERACTIVE_SELECTOR));

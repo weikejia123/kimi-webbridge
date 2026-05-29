@@ -128,7 +128,16 @@ export class ExtensionRouter {
     const start = Date.now();
 
     try {
-      ws.send(JSON.stringify({ requestId: generatedRequestId, tabId, frameId, tool, args }));
+      ws.send(JSON.stringify({
+        requestId: generatedRequestId,
+        v: "2.0",
+        id: requestId,
+        tool,
+        args,
+        timeoutMs,
+        tabId,
+        frameId,
+      }));
 
       const response = await new Promise<BridgeResponse>((resolve, reject) => {
         const timer = setTimeout(() => {

@@ -31,7 +31,7 @@ import { isVersionSupported } from "../protocol/versionNegotiation.js";
 import { daemonTraceStore } from "../tracing/traceStore.js";
 
 const HOST = "127.0.0.1";
-const PORT = 10086;
+const PORT = Number(process.env.WEBBRIDGE_PORT) || 10086;
 const MAX_PAYLOAD_BYTES = 10 * 1024 * 1024; // 10 MB
 const SERVER_TIMEOUT_CAP_MS = 60000; // 60s
 const HEARTBEAT_INTERVAL_MS = 30000; // 30s
@@ -499,32 +499,56 @@ function handleExtensionConnection(ws: WebSocket, url: URL | null): void {
     ws.close(1008, "Authentication timeout");
   }, 5000);
 
-  ws.once("message", (data) => {
-    clearTimeout(authTimeout);
+  let authenticated = false;
+
+  ws.on("message", (data) => {
     let parsed: unknown;
     try {
       parsed = JSON.parse(data.toString("utf-8"));
     } catch {
-      warn("[WebSocketServer] Extension auth message invalid JSON", { tabId });
-      ws.close(1008, "Invalid auth message");
+      warn("[WebSocketServer] Extension message invalid JSON", { tabId });
+      if (!authenticated) {
+        clearTimeout(authTimeout);
+        ws.close(1008, "Invalid auth message");
+      }
       return;
     }
     if (typeof parsed !== "object" || parsed === null) {
-      ws.close(1008, "Invalid auth message");
+      if (!authenticated) {
+        clearTimeout(authTimeout);
+        ws.close(1008, "Invalid auth message");
+      }
       return;
     }
     const obj = parsed as Record<string, unknown>;
-    if (
-      obj.type !== "auth" ||
-      typeof obj.token !== "string" ||
-      !sessionAuth.validateToken(obj.token)
-    ) {
-      warn("[WebSocketServer] Extension auth rejected", { tabId });
-      ws.close(1008, "Invalid authentication token");
+
+    if (obj.type === "auth") {
+      clearTimeout(authTimeout);
+      if (
+        typeof obj.token !== "string" ||
+        !sessionAuth.validateToken(obj.token)
+      ) {
+        warn("[WebSocketServer] Extension auth rejected", { tabId });
+        ws.close(1008, "Invalid authentication token");
+        return;
+      }
+      authenticated = true;
+      extensionRouter.registerTab(tabId, ws);
+      info("[WebSocketServer] Extension connected", { tabId });
       return;
     }
-    extensionRouter.registerTab(tabId, ws);
-    info("[WebSocketServer] Extension connected", { tabId });
+
+    if (obj.type === "register") {
+      // Registration is informational; tab is already registered after auth.
+      debug("[WebSocketServer] Extension registration received", { tabId, version: obj.version });
+      return;
+    }
+
+    // Unknown message type from extension
+    if (!authenticated) {
+      warn("[WebSocketServer] Extension sent unexpected message before auth", { tabId, type: obj.type });
+      ws.close(1008, "Authentication required");
+    }
   });
 }
 

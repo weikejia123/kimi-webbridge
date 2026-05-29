@@ -8,9 +8,16 @@
   ],
   "scripts": {
     "build": "npm run build --workspaces",
-    "typecheck": "npm run typecheck --workspaces"
+    "typecheck": "npm run typecheck --workspaces",
+    "test": "node --test daemon/tests/*.test.mjs extension/tests/*.test.mjs",
+    "test:daemon": "node --test daemon/tests/*.test.mjs",
+    "test:extension": "node --test extension/tests/*.test.mjs",
+    "smoke": "node scripts/smoke-test.mjs",
+    "package:extension": "node scripts/package-extension.mjs",
+    "start:daemon": "node scripts/start-daemon.mjs"
   },
   "devDependencies": {
-    "typescript": "^5.4.0"
+    "typescript": "^5.4.0",
+    "ws": "^8.17.0"
   }
 }

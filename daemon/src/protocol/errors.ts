@@ -58,8 +58,14 @@ export const errorFactory = {
   },
 
   invalidArgument(message = "Invalid argument"): BridgeError {
-    return createBridgeError("UNKNOWN_ERROR", message, {
+    return createBridgeError("INVALID_ARGUMENT", message, {
       recoverable: true,
+    });
+  },
+
+  permissionDenied(message = "Permission denied"): BridgeError {
+    return createBridgeError("PERMISSION_DENIED", message, {
+      recoverable: false,
     });
   },
 

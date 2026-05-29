@@ -15,6 +15,8 @@ import { tabElementCache } from "../state/tabElementCache.js";
 const TargetSchema = z.object({
   ref: z.string().optional(),
   selector: z.string().optional(),
+  text: z.string().optional(),
+  name: z.string().optional(),
 });
 
 const ClickRefArgsSchema = z.object({
@@ -37,8 +39,10 @@ export async function handleClickRef(args: unknown, ctx: ToolContext): Promise<B
     const cached = tabElementCache.get(ctx.tabId);
     if (cached) {
       const match = cached.find((el) => el.ref === target.ref);
-      if (match?.selector) {
-        target.selector = match.selector;
+      if (match) {
+        if (match.selector) target.selector = match.selector;
+        if (match.name) target.name = match.name;
+        if (match.text) target.text = match.text;
       }
     }
   }

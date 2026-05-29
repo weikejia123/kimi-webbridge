@@ -96,6 +96,9 @@ import { handleDescribeElement } from "./describeElement.js";
 import { handleHighlight } from "./highlight.js";
 import { handleClickRef } from "./clickRef.js";
 import { handleClick } from "./click.js";
+import { handleSelectOption } from "./selectOption.js";
+import { handleScrollTo } from "./scrollTo.js";
+import { handleHover } from "./hover.js";
 import { handleFill } from "./fill.js";
 
 registry.set("find_element", handleFindElement);
@@ -104,6 +107,9 @@ registry.set("describe_element", handleDescribeElement);
 registry.set("highlight", handleHighlight);
 registry.set("click_ref", handleClickRef);
 registry.set("click", handleClick);
+registry.set("select_option", handleSelectOption);
+registry.set("scroll_to", handleScrollTo);
+registry.set("hover", handleHover);
 registry.set("fill", handleFill);
 
 // ---------------------------------------------------------------------------
@@ -111,8 +117,10 @@ registry.set("fill", handleFill);
 // ---------------------------------------------------------------------------
 
 import { handleRecover } from "./recover.js";
+import { handleRollback } from "./rollback.js";
 
 registry.set("recover", handleRecover);
+registry.set("rollback", handleRollback);
 
 // ---------------------------------------------------------------------------
 // Phase 6 tool handlers — Daemon Hardening, Status, UX Polish
@@ -124,6 +132,9 @@ import { handleStartTrace } from "./startTrace.js";
 import { handleStopTrace } from "./stopTrace.js";
 import { handleGetLastTrace } from "./getLastTrace.js";
 import { handleCaptureScreenshot } from "./captureScreenshot.js";
+import { handleAnnotatedScreenshot } from "./annotatedScreenshot.js";
+import { handleStartRecording } from "./startRecording.js";
+import { handleStopRecording } from "./stopRecording.js";
 
 registry.set("get_bridge_status", handleGetBridgeStatus);
 registry.set("set_policy", handleSetPolicy);
@@ -131,3 +142,42 @@ registry.set("start_trace", handleStartTrace);
 registry.set("stop_trace", handleStopTrace);
 registry.set("get_last_trace", handleGetLastTrace);
 registry.set("capture_screenshot", handleCaptureScreenshot);
+registry.set("annotated_screenshot", handleAnnotatedScreenshot);
+registry.set("start_recording", handleStartRecording);
+registry.set("stop_recording", handleStopRecording);
+
+import { handleNavigate } from "./navigate.js";
+import { handleReload } from "./reload.js";
+import { handleListTabs } from "./listTabs.js";
+import { handleSwitchTab } from "./switchTab.js";
+import { handleClickAt } from "./clickAt.js";
+import { handleGetSemanticDiff } from "./getSemanticDiff.js";
+import { handleClassifyForm } from "./classifyForm.js";
+import { handleRunWorkflow } from "./runWorkflow.js";
+import { handleRunBatch } from "./runBatch.js";
+import { handleExportResults } from "./exportResults.js";
+import { handleGetAuditLog } from "./getAuditLog.js";
+import { handleClearAuditLog } from "./clearAuditLog.js";
+
+registry.set("navigate", handleNavigate);
+registry.set("reload", handleReload);
+registry.set("list_tabs", handleListTabs);
+registry.set("switch_tab", handleSwitchTab);
+registry.set("click_at", handleClickAt);
+registry.set("get_semantic_diff", handleGetSemanticDiff);
+registry.set("classify_form", handleClassifyForm);
+
+// ---------------------------------------------------------------------------
+// Phase 5 tool handlers — Workflow / Batch Automation
+// ---------------------------------------------------------------------------
+
+registry.set("run_workflow", handleRunWorkflow);
+registry.set("run_batch", handleRunBatch);
+registry.set("export_results", handleExportResults);
+
+// ---------------------------------------------------------------------------
+// Phase 7 tool handlers — Audit Log
+// ---------------------------------------------------------------------------
+
+registry.set("get_audit_log", handleGetAuditLog);
+registry.set("clear_audit_log", handleClearAuditLog);

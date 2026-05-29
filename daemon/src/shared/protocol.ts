@@ -23,6 +23,8 @@ export type TargetRef = {
   textHash?: string;
   rect?: Rect;
   xpath?: string;
+  text?: string;
+  name?: string;
 };
 
 export type Rect = {
@@ -135,6 +137,8 @@ export type BridgeErrorCode =
   | "USER_INTERVENTION_REQUIRED"
   | "INVALID_ARGUMENT"
   | "SCREENSHOT_ERROR"
+  | "RECORDING_ERROR"
+  | "FILE_UPLOAD_ERROR"
   | "UNKNOWN_ERROR";
 
 export type BridgeError = {
@@ -231,6 +235,12 @@ export type ElementDescription = {
   children?: ElementInfo[];
 };
 
+export type SelectOptionResult = {
+  action: "select_option";
+  success: boolean;
+  matched?: number;
+};
+
 export type EvaluateResult = {
   type: "json" | "text" | "preview";
   value?: unknown;
@@ -280,6 +290,19 @@ export type BridgeStatus = {
 export type ApprovalResult = {
   approved: boolean;
   timedOut: boolean;
+};
+
+export type UploadFileArgs = {
+  target: TargetRef;
+  data: string;
+  fileName: string;
+  mimeType?: string;
+};
+
+export type UploadFileResult = {
+  success: boolean;
+  fileName: string;
+  bytesUploaded: number;
 };
 
 // ---------------------------------------------------------------------------

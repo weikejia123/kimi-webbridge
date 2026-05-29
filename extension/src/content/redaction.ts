@@ -56,3 +56,21 @@ export function redactSensitiveValues(obj: unknown): unknown {
 
   return result;
 }
+
+const PII_RULES: Array<{ regex: RegExp; replacement: string }> = [
+  { regex: /\b\d{3}-\d{2}-\d{4}\b/g, replacement: "[REDACTED-SSN]" },
+  { regex: /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g, replacement: "[REDACTED-EMAIL]" },
+  { regex: /\b\d{3}[.-]?\d{3}[.-]?\d{4}\b/g, replacement: "[REDACTED-PHONE]" },
+  { regex: /\b(?:\d{4}[ -]?){3}\d{4}\b/g, replacement: "[REDACTED-CC]" },
+];
+
+/**
+ * Redact PII from a plain text string.
+ */
+export function redactPii(text: string): string {
+  let result = text;
+  for (const rule of PII_RULES) {
+    result = result.replace(rule.regex, rule.replacement);
+  }
+  return result;
+}
