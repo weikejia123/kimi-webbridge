@@ -18,6 +18,7 @@ import { logAction, getAuditLog, clearAuditLog } from "./auditLog.js";
 import { redactPii } from "./piiRedaction.js";
 import { checkRateLimit } from "./rateLimiter.js";
 import { checkDomainPermission } from "./permissionModel.js";
+import { isCdpTool, executeCdpTool } from "./cdpTools.js";
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -293,6 +294,55 @@ async function handleDaemonMessage(data: unknown): Promise<void> {
   if (cmd.tool === "switch_tab") {
     const response = await handleSwitchTab(cmd);
     sendToDaemon(response, correlationId);
+    return;
+  }
+
+  // CDP tools — 通过 chrome.debugger 协议执行的浏览器级操作
+  if (isCdpTool(cmd.tool)) {
+    const start = Date.now();
+    const tabId = typeof cmd.tabId === "number" ? cmd.tabId : activeTabId;
+    if (tabId === null && cmd.tool !== "close_tab" && cmd.tool !== "close_session") {
+      sendToDaemon({
+        v: "2.0",
+        id: cmd.id,
+        ok: false,
+        tool: cmd.tool,
+        result: null,
+        error: createBridgeError(
+          "UNKNOWN_ERROR",
+          "No target tab specified and no active tab available",
+          { recoverable: true },
+        ),
+        warnings: [],
+        telemetry: { durationMs: Date.now() - start },
+      });
+      return;
+    }
+    try {
+      const result = await executeCdpTool(cmd.tool, tabId ?? 0, cmd.args as Record<string, unknown>);
+      sendToDaemon({
+        v: "2.0",
+        id: cmd.id,
+        ok: true,
+        tool: cmd.tool,
+        result,
+        error: null,
+        warnings: [],
+        telemetry: { durationMs: Date.now() - start },
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      sendToDaemon({
+        v: "2.0",
+        id: cmd.id,
+        ok: false,
+        tool: cmd.tool,
+        result: null,
+        error: createBridgeError("UNKNOWN_ERROR", message, { recoverable: true }),
+        warnings: [],
+        telemetry: { durationMs: Date.now() - start },
+      });
+    }
     return;
   }
 
