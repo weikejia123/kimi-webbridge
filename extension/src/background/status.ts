@@ -86,7 +86,7 @@ export function getStatus(): ExtensionStatus {
   return {
     version: chrome.runtime.getManifest().version,
     connected: connectionState.connected,
-    daemonUrl: `ws://127.0.0.1:10086/extension`,
+    daemonUrl: `ws://127.0.0.1:10186/extension`,
     activeTabId: connectionState.activeTabId,
     policy: cachedPolicy,
     lastHeartbeat,

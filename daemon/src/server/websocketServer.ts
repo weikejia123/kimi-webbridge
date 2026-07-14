@@ -31,7 +31,7 @@ import { isVersionSupported } from "../protocol/versionNegotiation.js";
 import { daemonTraceStore } from "../tracing/traceStore.js";
 
 const HOST = "127.0.0.1";
-const PORT = Number(process.env.WEBBRIDGE_PORT) || 10086;
+const PORT = Number(process.env.WEBBRIDGE_PORT) || 10186;
 const MAX_PAYLOAD_BYTES = 10 * 1024 * 1024; // 10 MB
 const SERVER_TIMEOUT_CAP_MS = 60000; // 60s
 const HEARTBEAT_INTERVAL_MS = 30000; // 30s

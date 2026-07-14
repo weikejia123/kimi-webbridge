@@ -25,7 +25,7 @@ import { isCdpTool, executeCdpTool, isDualChannelTool } from "./cdpTools.js";
 // ---------------------------------------------------------------------------
 
 const DAEMON_HOST = "127.0.0.1";
-const DAEMON_PORT = 10086;
+const DAEMON_PORT = 10186;
 const DEFAULT_TIMEOUT_MS = 10000;
 const MAX_RECONNECT_ATTEMPTS = 5;
 const RECONNECT_BASE_DELAY_MS = 1000;
@@ -756,7 +756,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       const status: BridgeStatus = {
         daemon: {
           version: "1.0.0",
-          port: 10086,
+          port: 10186,
           protocol: "2.0",
         },
         extension: {
