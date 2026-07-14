@@ -78,13 +78,13 @@ import { handleGetPageState } from "./getPageState.js";
 import { handleExtractText } from "./extractText.js";
 import { handleGetFullText } from "./getFullText.js";
 import { handleQueryElements } from "./queryElements.js";
-import { handleSnapshot } from "./snapshot.js";
 
 registry.set("get_page_state", handleGetPageState);
 registry.set("extract_text", handleExtractText);
 registry.set("get_full_text", handleGetFullText);
 registry.set("query_elements", handleQueryElements);
-registry.set("snapshot", handleSnapshot);
+// snapshot 由 CDP 层实现（见 CDP 工具注册段）
+//registry.set("snapshot", handleSnapshot);
 
 // ---------------------------------------------------------------------------
 // Phase 4 tool handlers — Element Registry + Reliable Targeting
@@ -181,29 +181,30 @@ registry.set("export_results", handleExportResults);
 
 registry.set("get_audit_log", handleGetAuditLog);
 registry.set("clear_audit_log", handleClearAuditLog);
+registry.set("snapshot", makePassthrough("snapshot"));
 
 // ---------------------------------------------------------------------------
-// CDP 工具 — 透传到 Extension CDP 层
+// CDP 工具 — 直接注册，不依赖外部导入
 // ---------------------------------------------------------------------------
 
-import {
-  handleMouseClick,
-  handleCdpSnapshot,
-  handleNetwork,
-  handleSaveAsPdf,
-  handleUpload,
-  handleCdp,
-  handleCloseTab,
-  handleCloseSession,
-} from "./cdpPassthrough.js";
+import { extensionRouter } from "../extension/router.js";
 
-registry.set("mouse_click", handleMouseClick);
-registry.set("network", handleNetwork);
-registry.set("save_as_pdf", handleSaveAsPdf);
-registry.set("upload", handleUpload);
-registry.set("cdp", handleCdp);
-registry.set("close_tab", handleCloseTab);
-registry.set("close_session", handleCloseSession);
+function makePassthrough(name: string) {
+  return async (args: unknown, ctx: ToolContext): Promise<BridgeResponse> => {
+    const start = Date.now();
+    const response = await extensionRouter.sendCommand(
+      ctx.tabId, ctx.frameId, name,
+      args ?? {}, ctx.timeoutMs ?? 30000, ctx.command.id,
+    );
+    return { ...response, id: ctx.command.id, tool: ctx.command.tool, telemetry: { ...response.telemetry, durationMs: Date.now() - start } };
+  };
+}
 
-// snapshot 改用 CDP Accessibility.getFullAXTree 实现（替代旧的 get_page_state 映射）
-registry.set("snapshot", handleCdpSnapshot);
+registry.set("mouse_click", makePassthrough("mouse_click"));
+registry.set("network", makePassthrough("network"));
+registry.set("save_as_pdf", makePassthrough("save_as_pdf"));
+registry.set("upload", makePassthrough("upload"));
+registry.set("cdp", makePassthrough("cdp"));
+registry.set("close_tab", makePassthrough("close_tab"));
+registry.set("close_session", makePassthrough("close_session"));
+// snapshot 已注册为 CDP 版本

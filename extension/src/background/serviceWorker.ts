@@ -350,9 +350,10 @@ async function handleDaemonMessage(data: unknown): Promise<void> {
           warnings: [],
           telemetry: { durationMs: Date.now() - start },
         });
+        return; // ← 纯 CDP 工具失败后必须 return，不穿透到 Content Script
       }
     }
-    // 纯 CDP 工具在此 return；双通道工具 CDP 失败后不 return（降落伞）
+    // pure CDP tools return above; dual-channel tools fall through to content script
   }
 
   // Audit log commands are handled directly by the service worker.

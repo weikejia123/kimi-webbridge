@@ -22,6 +22,21 @@ ensure_built() {
   fi
 }
 
+clear_port() {
+  local pid
+  pid=$(lsof -ti :"$PORT" 2>/dev/null || true)
+  if [ -n "$pid" ]; then
+    echo "    ⚠ 端口 $PORT 被 pid $pid 占用，强制释放..."
+    kill "$pid" 2>/dev/null || true
+    sleep 1
+    if kill -0 "$pid" 2>/dev/null; then
+      kill -9 "$pid" 2>/dev/null || true
+      sleep 1
+    fi
+    echo "    端口已释放"
+  fi
+}
+
 case "${1:-help}" in
   start)
     ensure_built
@@ -30,6 +45,8 @@ case "${1:-help}" in
       tail -f "$LOG_FILE"
       exit 0
     fi
+    # 清理残留端口占用（如旧 daemon 未正确清理）
+    clear_port
     echo "==> 启动 daemon (port $PORT)..."
     WEBBRIDGE_PORT="$PORT" nohup node daemon/dist/server/websocketServer.js \
       > "$LOG_FILE" 2>&1 &

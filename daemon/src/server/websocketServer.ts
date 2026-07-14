@@ -263,6 +263,8 @@ export function startServer(): WebSocketServer {
 
   wss.on("listening", () => {
     info(`[WebSocketServer] Listening on ws://${HOST}:${PORT} (v${DAEMON_VERSION})`);
+    // Debug: 打印已注册的工具数量
+    debug(`Tools registered: ${Array.from(resolveTool({ tool: "ping" } as BridgeCommand) ? ">0" : "0")}`);
   });
 
   wss.on("connection", (ws, req) => {
