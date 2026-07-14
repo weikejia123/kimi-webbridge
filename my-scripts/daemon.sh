@@ -1,7 +1,11 @@
 #!/bin/bash
 # kimi-webbridge Daemon 启停脚本
 # 用法: ./my-scripts/daemon.sh start|stop|status|restart
-# V1-20260714
+#       start  — 后台启动 + 实时日志跟踪（Ctrl+C 停止日志，daemon 继续运行）
+#       stop   — 停止 daemon
+#       status — 查看状态
+#       restart— 重启
+# V2-20260714
 
 set -e
 cd "$(dirname "$0")/.."
@@ -22,7 +26,8 @@ case "${1:-help}" in
   start)
     ensure_built
     if [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
-      echo "daemon 已在运行 (pid $(cat "$PID_FILE"))"
+      echo "daemon 已在运行 (pid $(cat "$PID_FILE"))，跟踪日志..."
+      tail -f "$LOG_FILE"
       exit 0
     fi
     echo "==> 启动 daemon (port $PORT)..."
@@ -33,9 +38,12 @@ case "${1:-help}" in
     sleep 2
     if kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
       echo "    pid $(cat "$PID_FILE") — ws://127.0.0.1:$PORT"
+      echo "    -> 跟踪日志中（Ctrl+C 停止跟踪，daemon 继续运行）"
+      tail -f "$LOG_FILE"
     else
-      echo "    ❌ 启动失败，查看日志: $LOG_FILE"
-      tail -5 "$LOG_FILE"
+      echo "    ❌ 启动失败，最后 10 行日志:"
+      tail -10 "$LOG_FILE"
+      rm -f "$PID_FILE"
       exit 1
     fi
     ;;
@@ -71,6 +79,12 @@ case "${1:-help}" in
     ;;
   help|*)
     echo "用法: $0 {start|stop|status|restart}"
+    echo ""
+    echo "  start   — 后台启动 + 自动 tail -f 跟踪日志"
+    echo "            Ctrl+C 停止跟踪，daemon 继续运行"
+    echo "  stop    — 停止 daemon"
+    echo "  status  — 查看运行状态"
+    echo "  restart — 重启"
     echo ""
     echo "  端口通过 WEBBRIDGE_PORT 环境变量控制，默认 10186"
     exit 0
