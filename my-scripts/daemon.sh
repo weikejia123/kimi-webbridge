@@ -23,18 +23,27 @@ ensure_built() {
 }
 
 clear_port() {
-  local pid
-  pid=$(lsof -ti :"$PORT" 2>/dev/null || true)
-  if [ -n "$pid" ]; then
+  local pids
+  pids=$(lsof -ti :"$PORT" 2>/dev/null || true)
+  if [ -z "$pids" ]; then
+    return
+  fi
+  # lsof -ti 可能返回多个 PID，逐个处理
+  echo "$pids" | while read -r pid; do
+    [ -z "$pid" ] && continue
     echo "    ⚠ 端口 $PORT 被 pid $pid 占用，强制释放..."
     kill "$pid" 2>/dev/null || true
-    sleep 1
+  done
+  sleep 1
+  # 没死透的补刀
+  echo "$pids" | while read -r pid; do
+    [ -z "$pid" ] && continue
     if kill -0 "$pid" 2>/dev/null; then
       kill -9 "$pid" 2>/dev/null || true
-      sleep 1
     fi
-    echo "    端口已释放"
-  fi
+  done
+  sleep 1
+  echo "    端口已释放"
 }
 
 case "${1:-help}" in
