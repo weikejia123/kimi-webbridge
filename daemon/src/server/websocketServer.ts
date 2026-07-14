@@ -29,6 +29,10 @@ import { sessionAuth } from "../security/sessionAuth.js";
 import { originPolicy } from "../security/originPolicy.js";
 import { isVersionSupported } from "../protocol/versionNegotiation.js";
 import { daemonTraceStore } from "../tracing/traceStore.js";
+import { createRequire } from "module";
+
+const require = createRequire(import.meta.url);
+const { version: DAEMON_VERSION } = require("../../package.json");
 
 const HOST = "127.0.0.1";
 const PORT = Number(process.env.WEBBRIDGE_PORT) || 10186;
@@ -258,7 +262,7 @@ export function startServer(): WebSocketServer {
   const wss = new WebSocketServer({ host: HOST, port: PORT });
 
   wss.on("listening", () => {
-    info(`[WebSocketServer] Listening on ws://${HOST}:${PORT}`);
+    info(`[WebSocketServer] Listening on ws://${HOST}:${PORT} (v${DAEMON_VERSION})`);
   });
 
   wss.on("connection", (ws, req) => {
