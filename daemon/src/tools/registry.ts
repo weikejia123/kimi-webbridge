@@ -181,3 +181,29 @@ registry.set("export_results", handleExportResults);
 
 registry.set("get_audit_log", handleGetAuditLog);
 registry.set("clear_audit_log", handleClearAuditLog);
+
+// ---------------------------------------------------------------------------
+// CDP 工具 — 透传到 Extension CDP 层
+// ---------------------------------------------------------------------------
+
+import {
+  handleMouseClick,
+  handleCdpSnapshot,
+  handleNetwork,
+  handleSaveAsPdf,
+  handleUpload,
+  handleCdp,
+  handleCloseTab,
+  handleCloseSession,
+} from "./cdpPassthrough.js";
+
+registry.set("mouse_click", handleMouseClick);
+registry.set("network", handleNetwork);
+registry.set("save_as_pdf", handleSaveAsPdf);
+registry.set("upload", handleUpload);
+registry.set("cdp", handleCdp);
+registry.set("close_tab", handleCloseTab);
+registry.set("close_session", handleCloseSession);
+
+// snapshot 改用 CDP Accessibility.getFullAXTree 实现（替代旧的 get_page_state 映射）
+registry.set("snapshot", handleCdpSnapshot);
