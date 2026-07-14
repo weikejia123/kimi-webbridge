@@ -18,7 +18,7 @@ import { logAction, getAuditLog, clearAuditLog } from "./auditLog.js";
 import { redactPii } from "./piiRedaction.js";
 import { checkRateLimit } from "./rateLimiter.js";
 import { checkDomainPermission } from "./permissionModel.js";
-import { isCdpTool, executeCdpTool } from "./cdpTools.js";
+import { isCdpTool, executeCdpTool, isDualChannelTool } from "./cdpTools.js";
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -330,20 +330,29 @@ async function handleDaemonMessage(data: unknown): Promise<void> {
         warnings: [],
         telemetry: { durationMs: Date.now() - start },
       });
+      return; // CDP 成功，直接返回
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      sendToDaemon({
-        v: "2.0",
-        id: cmd.id,
-        ok: false,
-        tool: cmd.tool,
-        result: null,
-        error: createBridgeError("UNKNOWN_ERROR", message, { recoverable: true }),
-        warnings: [],
-        telemetry: { durationMs: Date.now() - start },
-      });
+      // 双通道工具：CDP 失败后降级到 Content Script
+      if (isDualChannelTool(cmd.tool)) {
+        console.warn(
+          `[Fahd's WebBridge] CDP ${cmd.tool} failed, falling back to content script: ${message}`,
+        );
+        // 不 return，继续执行后续的 Content Script 路由
+      } else {
+        sendToDaemon({
+          v: "2.0",
+          id: cmd.id,
+          ok: false,
+          tool: cmd.tool,
+          result: null,
+          error: createBridgeError("UNKNOWN_ERROR", message, { recoverable: true }),
+          warnings: [],
+          telemetry: { durationMs: Date.now() - start },
+        });
+      }
     }
-    return;
+    // 纯 CDP 工具在此 return；双通道工具 CDP 失败后不 return（降落伞）
   }
 
   // Audit log commands are handled directly by the service worker.

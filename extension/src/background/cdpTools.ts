@@ -408,6 +408,185 @@ export async function handleCloseTab(
 }
 
 // ---------------------------------------------------------------------------
+// 8. Dual-Channel Tools（CDP 优先，失败可降级到 Content Script）
+// ---------------------------------------------------------------------------
+
+export interface ClickRefParams {
+  target: { ref?: string; selector?: string; text?: string; name?: string };
+  button?: string;
+  clickCount?: number;
+}
+
+export async function handleClickRefCDP(
+  tabId: number,
+  params: ClickRefParams,
+): Promise<Record<string, unknown>> {
+  const selector = params.target?.selector;
+  const ref = params.target?.ref;
+  if (!selector && !ref) {
+    throw new Error("click_ref: requires target.selector or target.ref");
+  }
+
+  await attach(tabId);
+
+  // 用 CDP 找元素并真实点击
+  const expr = selector
+    ? `document.querySelector(${JSON.stringify(selector)})`
+    : `(() => {
+      const el = document.querySelector(${JSON.stringify(ref)});
+      if (!el) return null;
+      const r = el.getBoundingClientRect();
+      return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+    })()`;
+
+  const evalResult = await send<{
+    result?: { value?: unknown; subtype?: string };
+  }>("Runtime.evaluate", {
+    expression: selector
+      ? `(() => {
+          const el = ${expr};
+          if (!el) return { error: 'element not found' };
+          const r = el.getBoundingClientRect();
+          el.scrollIntoView({ block: 'center' });
+          return { x: r.left + r.width / 2, y: r.top + r.height / 2, tag: el.tagName };
+        })()`
+      : `(() => {
+          const el = document.querySelector('[data-ref="${ref}"]');
+          if (!el) return { error: 'ref not found' };
+          const r = el.getBoundingClientRect();
+          el.scrollIntoView({ block: 'center' });
+          return { x: r.left + r.width / 2, y: r.top + r.height / 2, tag: el.tagName };
+        })()`,
+    returnByValue: true,
+  });
+
+  const val = evalResult?.result?.value as
+    | { x: number; y: number; tag?: string }
+    | { error: string }
+    | undefined;
+
+  if (!val || "error" in val) {
+    throw new Error(`click_ref: ${(val as { error?: string })?.error ?? "failed"}`);
+  }
+
+  // 真实鼠标事件
+  await send("Input.dispatchMouseEvent", { type: "mouseMoved", x: val.x, y: val.y });
+  await send("Input.dispatchMouseEvent", {
+    type: "mousePressed", x: val.x, y: val.y,
+    button: params.button ?? "left", clickCount: params.clickCount ?? 1,
+  });
+  await send("Input.dispatchMouseEvent", {
+    type: "mouseReleased", x: val.x, y: val.y,
+    button: params.button ?? "left", clickCount: params.clickCount ?? 1,
+  });
+
+  return { success: true, x: Math.round(val.x), y: Math.round(val.y), tag: val.tag };
+}
+
+export interface FillCDPParams {
+  target: { selector: string };
+  value: string;
+  clear?: boolean;
+}
+
+export async function handleFillCDP(
+  tabId: number,
+  params: FillCDPParams,
+): Promise<Record<string, unknown>> {
+  const selector = params.target?.selector;
+  if (!selector) throw new Error("fill: target.selector is required");
+  if (params.value === undefined) throw new Error("fill: value is required");
+
+  await attach(tabId);
+
+  const value = JSON.stringify(params.value);
+  const clearField = params.clear !== false;
+
+  const result = await send<{ result?: { value?: Record<string, unknown> } }>(
+    "Runtime.evaluate",
+    {
+      expression: `(() => {
+        const el = document.querySelector(${JSON.stringify(selector)});
+        if (!el) return { error: 'element not found' };
+        el.focus();
+        ${clearField ? "el.value = '';" : ""}
+        const nativeSetter = Object.getOwnPropertyDescriptor(
+          window.HTMLInputElement.prototype, 'value'
+        )?.set || Object.getOwnPropertyDescriptor(
+          window.HTMLTextAreaElement.prototype, 'value'
+        )?.set;
+        if (nativeSetter) nativeSetter.call(el, ${value});
+        else el.value = ${value};
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+        return { success: true, tag: el.tagName };
+      })()`,
+      returnByValue: true,
+    },
+  );
+
+  const val = result?.result?.value as { success?: boolean; error?: string } | undefined;
+  if (!val || val.error) {
+    throw new Error(`fill: ${val?.error ?? "failed"}`);
+  }
+
+  return { success: true, value: params.value };
+}
+
+export interface EvaluateCDPParams {
+  code: string;
+  args?: unknown;
+  returnMode?: string;
+  timeoutMs?: number;
+}
+
+export async function handleEvaluateCDP(
+  tabId: number,
+  params: EvaluateCDPParams,
+): Promise<Record<string, unknown>> {
+  if (!params.code) throw new Error("evaluate: code is required");
+
+  await attach(tabId);
+
+  const result = await send<{
+    result?: { type?: string; value?: unknown; subtype?: string };
+    exceptionDetails?: { text?: string; exception?: { description?: string } };
+  }>("Runtime.evaluate", {
+    expression: params.code,
+    returnByValue: params.returnMode !== "preview",
+    awaitPromise: true,
+    timeout: params.timeoutMs ?? 5000,
+  });
+
+  if (result.exceptionDetails) {
+    throw new Error(
+      `evaluate: ${result.exceptionDetails.exception?.description ?? result.exceptionDetails.text}`,
+    );
+  }
+
+  return {
+    type: result.result?.type,
+    value: result.result?.value,
+    subtype: result.result?.subtype,
+  };
+}
+
+export async function handleScreenshotCDP(
+  tabId: number,
+  _params: Record<string, unknown>,
+): Promise<Record<string, unknown>> {
+  await attach(tabId);
+
+  const result = await send<{ data: string }>("Page.captureScreenshot", {
+    format: "png",
+  });
+
+  if (!result?.data) throw new Error("screenshot: CDP returned no data");
+
+  return { format: "png", dataLength: result.data.length, data: result.data };
+}
+
+// ---------------------------------------------------------------------------
 // Tool Router — 统一分派入口
 // ---------------------------------------------------------------------------
 
@@ -425,11 +604,29 @@ const cdpToolMap: Record<string, CdpToolHandler> = {
   cdp: (tabId, p) => handleCdp(tabId, p as unknown as CdpParams),
   close_tab: (tabId, p) => handleCloseTab(tabId, p),
   close_session: (tabId, p) => handleCloseTab(tabId, p), // 用法兼容
+  // Dual-channel tools（CDP 优先）
+  click_ref: (tabId, p) => handleClickRefCDP(tabId, p as unknown as ClickRefParams),
+  fill: (tabId, p) => handleFillCDP(tabId, p as unknown as FillCDPParams),
+  evaluate_v2: (tabId, p) => handleEvaluateCDP(tabId, p as unknown as EvaluateCDPParams),
+  capture_screenshot: (tabId, p) => handleScreenshotCDP(tabId, p),
 };
 
 /** 判断工具名是否走 CDP 通道 */
 export function isCdpTool(tool: string): boolean {
   return tool in cdpToolMap;
+}
+
+/** 双通道工具集（CDP 优先，失败降级到 Content Script） */
+const dualChannelTools = new Set([
+  "click_ref",
+  "fill",
+  "evaluate_v2",
+  "capture_screenshot",
+]);
+
+/** 判断是否为双通道工具 */
+export function isDualChannelTool(tool: string): boolean {
+  return dualChannelTools.has(tool);
 }
 
 /** 执行 CDP 工具 */
