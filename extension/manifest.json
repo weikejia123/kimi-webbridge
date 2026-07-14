@@ -11,7 +11,8 @@
     "tabCapture",
     "debugger",
     "tabGroups",
-    "windows"
+    "windows",
+    "offscreen"
   ],
   "host_permissions": ["<all_urls>"],
   "background": {

@@ -1,171 +1,116 @@
 /**
- * CDP Session Manager
+ * Offscreen Document 管理器
  *
- * 封装 chrome.debugger API，管理标签页的 Debugger 会话生命周期。
- * 按需 attach（每次操作前 attach，操作后保持），避免反复弹权限窗口。
+ * 负责创建/关闭 offscreen document，并通过消息传递执行 CDP 调试命令。
  * V1-20260714
  */
 
-// ---------------------------------------------------------------------------
-// State
-// ---------------------------------------------------------------------------
+const OFFSCREEN_URL = chrome.runtime.getURL("offscreen/offscreen.html");
 
-let attachedTabId: number | null = null;
-let attachInProgress = false;
-const attachQueue: Array<{
-  resolve: (tabId: number) => void;
-  reject: (err: Error) => void;
-}> = [];
-
-// ---------------------------------------------------------------------------
-// Public API
-// ---------------------------------------------------------------------------
-
-/** 当前已 attach 的标签页 ID，没有则 null */
-export function getAttachedTabId(): number | null {
-  return attachedTabId;
-}
-
-/** 是否已 attach */
-export function isAttached(): boolean {
-  return attachedTabId !== null;
-}
-
-/**
- * 将 Debugger attach 到指定标签页。
- * 如果已经是该标签页则直接返回，否则 detach 旧的再 attach 新的。
- */
-export async function attach(tabId: number): Promise<void> {
-  if (attachedTabId === tabId) return;
-
-  // 如果正在 attach 过程中，排队等待
-  if (attachInProgress) {
-    return new Promise<void>((resolve, reject) => {
-      attachQueue.push({ resolve: () => resolve(), reject });
+/** 确保 offscreen document 已创建 */
+async function ensureOffscreen(): Promise<void> {
+  // chrome.runtime.getContexts 是 MV3 方法，需判断可用性
+  if (typeof chrome.runtime.getContexts === "function") {
+    const existing = await chrome.runtime.getContexts({
+      contextTypes: ["OFFSCREEN_DOCUMENT" as chrome.runtime.ContextType],
+      documentUrls: [OFFSCREEN_URL],
     });
+    if (existing && existing.length > 0) return;
   }
 
-  attachInProgress = true;
   try {
-    // Detach 旧的
-    if (attachedTabId !== null && attachedTabId !== tabId) {
-      await detachInternal(attachedTabId);
-    }
-
-    // Attach 新的
-    if (attachedTabId !== tabId) {
-      await new Promise<void>((resolve, reject) => {
-        chrome.debugger.attach(
-          { tabId },
-          "1.3",
-          () => {
-            const lastErr = chrome.runtime.lastError;
-            if (lastErr) {
-              reject(new Error(`debugger.attach failed: ${lastErr.message}`));
-              return;
-            }
-            attachedTabId = tabId;
-            resolve();
-          },
-        );
-      });
-    }
-
-    // 唤醒队列
-    for (const item of attachQueue) item.resolve(tabId);
-    attachQueue.length = 0;
+    await chrome.offscreen.createDocument({
+      url: OFFSCREEN_URL,
+      reasons: ["BLOBS" as chrome.offscreen.Reason],
+      justification: "Execute chrome.debugger commands outside service worker",
+    });
   } catch (err) {
-    for (const item of attachQueue) item.reject(err as Error);
-    attachQueue.length = 0;
+    // 如果已存在会抛错，忽略
+    if (
+      err instanceof Error &&
+      err.message?.includes("already exists")
+    ) {
+      return;
+    }
     throw err;
-  } finally {
-    attachInProgress = false;
   }
 }
 
-/**
- * 从指定标签页 detach。
- * 如果 tabId 匹配当前 attach 的标签页，置空 attachedTabId。
- */
-export async function detach(tabId?: number): Promise<void> {
-  const target = tabId ?? attachedTabId;
-  if (target === null) return;
-  await detachInternal(target);
-  if (attachedTabId === target) attachedTabId = null;
+/** 向 offscreen document 发送调试命令 */
+async function sendToOffscreen(
+  action: string,
+  tabId: number,
+  method?: string,
+  params?: Record<string, unknown>,
+): Promise<unknown> {
+  await ensureOffscreen();
+
+  return new Promise((resolve, reject) => {
+    const msg: Record<string, unknown> = {
+      target: "offscreen-debugger",
+      action,
+      tabId,
+    };
+    if (method) msg.method = method;
+    if (params !== undefined) msg.params = params;
+
+    const timeout = setTimeout(() => {
+      reject(new Error("offscreen response timeout (15s)"));
+    }, 15000);
+
+    chrome.runtime.sendMessage(msg, (response) => {
+      clearTimeout(timeout);
+      const lastErr = chrome.runtime.lastError;
+      if (lastErr) {
+        reject(new Error(lastErr.message));
+        return;
+      }
+      if (!response || !response.ok) {
+        reject(new Error(response?.error ?? "Unknown offscreen error"));
+        return;
+      }
+      resolve(response.result);
+    });
+  });
 }
 
-/**
- * 通过 CDP 发送命令到当前已 attach 的标签页。
- * 必须先调用 attach()。
- */
+// ---------------------------------------------------------------------------
+// 对外接口（替代原有的 chrome.debugger 直接调用）
+// ---------------------------------------------------------------------------
+
+let activeTabId: number | null = null;
+
+export async function attach(tabId: number): Promise<void> {
+  await sendToOffscreen("attach", tabId);
+  activeTabId = tabId;
+}
+
 export async function send<T = unknown>(
   method: string,
   params?: Record<string, unknown>,
 ): Promise<T> {
-  if (attachedTabId === null) {
+  if (activeTabId === null) {
     throw new Error("CDP: no tab attached — call cdpAttach(tabId) first");
   }
-
-  return new Promise<T>((resolve, reject) => {
-    chrome.debugger.sendCommand(
-      { tabId: attachedTabId! },
-      method,
-      params ?? {},
-      (result) => {
-        const lastErr = chrome.runtime.lastError;
-        if (lastErr) {
-          reject(new Error(`CDP ${method} failed: ${lastErr.message}`));
-          return;
-        }
-        resolve(result as T);
-      },
-    );
-  });
+  return (await sendToOffscreen(
+    "send",
+    activeTabId,
+    method,
+    params,
+  )) as T;
 }
 
-/**
- * 确保标签页已 attach。如果 tabId 匹配当前则跳过，否则 attach。
- * 便捷方法：直接 attach + 检查。
- */
-export async function ensureAttached(tabId: number): Promise<void> {
-  await attach(tabId);
+export async function detach(tabId?: number): Promise<void> {
+  const target = tabId ?? activeTabId;
+  if (target === null) return;
+  await sendToOffscreen("detach", target);
+  if (activeTabId === target) activeTabId = null;
 }
 
-// ---------------------------------------------------------------------------
-// Internal
-// ---------------------------------------------------------------------------
-
-async function detachInternal(tabId: number): Promise<void> {
-  try {
-    await new Promise<void>((resolve, reject) => {
-      chrome.debugger.detach(
-        { tabId },
-        () => {
-          const lastErr = chrome.runtime.lastError;
-          if (lastErr) {
-            // "Debugger is not attached" 可忽略
-            if (
-              lastErr.message?.includes("not attached") ||
-              lastErr.message?.includes("No tab with given id")
-            ) {
-              resolve();
-              return;
-            }
-            reject(new Error(`debugger.detach failed: ${lastErr.message}`));
-            return;
-          }
-          resolve();
-        },
-      );
-    });
-  } catch {
-    // 忽略 detach 错误
-  }
+export function getAttachedTabId(): number | null {
+  return activeTabId;
 }
 
-// chrome.debugger.onDetach 监听
-chrome.debugger.onDetach.addListener((source) => {
-  if (source.tabId === attachedTabId) {
-    attachedTabId = null;
-  }
-});
+export function isAttached(): boolean {
+  return activeTabId !== null;
+}

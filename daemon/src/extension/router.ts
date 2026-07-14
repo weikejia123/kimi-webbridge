@@ -110,7 +110,14 @@ export class ExtensionRouter {
     timeoutMs = 30000,
     requestId = "",
   ): Promise<BridgeResponse> {
-    const ws = tabConnections.get(tabId);
+    // tabId 为 0 时自动使用第一个已连接的标签页
+    let targetTabId = tabId;
+    if (targetTabId === 0) {
+      const connected = this.getConnectedTabs();
+      targetTabId = connected[0] ?? tabId;
+    }
+
+    const ws = tabConnections.get(targetTabId);
     if (!ws || ws.readyState !== WebSocket.OPEN) {
       return {
         v: "2.0",
@@ -135,7 +142,7 @@ export class ExtensionRouter {
         tool,
         args,
         timeoutMs,
-        tabId,
+        tabId: targetTabId,
         frameId,
       }));
 
